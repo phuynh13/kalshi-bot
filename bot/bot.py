@@ -7,6 +7,7 @@ Designed to be run as a daily scheduled task on PythonAnywhere.
 Flow:
   1. Mark stale unsettled orders as unknown (>7 days past close)
   2. Update settlements for any past orders that have now resolved
+     (reads fees + fill cost directly from Kalshi's order response)
   3. Check today's remaining budget
   4. Scan markets closing within 24 hours
   5. Filter by probability, spread, volume, category
@@ -36,15 +37,47 @@ log = logging.getLogger(__name__)
 ROUND_UP_CENTS = True
 
 # ── Kalshi order status taxonomy ──────────────────────────────────────────────
-# Whitelist approach: every status the bot has explicit logic for goes here.
-# Anything not in either set is logged and skipped (will retry next run, or
-# eventually time out via the stale-order cleanup in update_settlements).
-
-# Order never filled — no money committed, no position opened
 KNOWN_UNFILLED = {"cancelled", "expired"}
-
-# Order fully executed — proceed to market-result settlement
 KNOWN_FILLED = {"filled", "executed"}
+
+
+# ── Helpers for reading authoritative data from Kalshi's order response ──────
+
+def extract_fill_data(kalshi_order: dict) -> tuple[float, float, int]:
+    """
+    Pull fill cost, fees, and count from a Kalshi order response.
+
+    Kalshi returns these as strings in fixed-point dollars (e.g. "0.5600").
+    They split fills into 'taker' (took liquidity, higher fee) and 'maker'
+    (provided liquidity, lower fee). For most of our limit orders these will
+    be all-maker, but the API doesn't guarantee that — sum both to be safe.
+
+    Returns:
+        (total_fees_dollars, total_fill_cost_dollars, filled_count)
+    """
+    def _f(key: str) -> float:
+        """Safely parse a fixed-point dollar string from the API."""
+        try:
+            return float(kalshi_order.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    taker_fees = _f("taker_fees_dollars")
+    maker_fees = _f("maker_fees_dollars")
+    total_fees = round(taker_fees + maker_fees, 4)
+
+    taker_cost = _f("taker_fill_cost_dollars")
+    maker_cost = _f("maker_fill_cost_dollars")
+    total_fill_cost = round(taker_cost + maker_cost, 4)
+
+    # fill_count_fp is a fixed-point string like "1.00" — convert to int
+    # (we always trade whole contracts, so int is safe here)
+    try:
+        filled = int(float(kalshi_order.get("fill_count_fp") or 0))
+    except (TypeError, ValueError):
+        filled = 0
+
+    return total_fees, total_fill_cost, filled
 
 
 # ── Settlement updater ────────────────────────────────────────────────────────
@@ -53,18 +86,14 @@ def update_settlements(kalshi: KalshiClient, db: Database):
     """
     Three-phase settlement update:
 
-    Phase 0 — Garbage collect stale orders that are way past their close_time
-              (>7 days). These are zombies — Kalshi never resolved them and
-              retrying every run wastes API calls.
-
-    Phase 1 — For each remaining unsettled order, check the Kalshi order status.
-              Whitelist: explicitly handle filled, cancelled, expired, resting,
-              partially_filled. Anything else is logged and skipped for retry.
-
-    Phase 2 — If the order was filled, fetch the market result and
-              compute actual P&L (payout - entry_price).
+    Phase 0 — Garbage collect stale orders (>7 days past close).
+    Phase 1 — Classify each unsettled order's status via Kalshi.
+              For filled orders, also extract authoritative fill + fee data
+              from the same response.
+    Phase 2 — For filled orders: fetch market result, compute P&L using
+              real fill cost (not limit price), record with real fees.
     """
-    # ── Phase 0: clean up zombies before doing real work ──────────────────────
+    # Phase 0
     stale = db.get_stale_unsettled_orders()
     if stale:
         log.warning(
@@ -74,7 +103,7 @@ def update_settlements(kalshi: KalshiClient, db: Database):
         for order in stale:
             db.mark_order_unknown(order["id"])
 
-    # ── Phase 1 & 2: normal settlement for orders within the giveup window ────
+    # Phase 1 & 2
     unsettled = db.get_unsettled_orders()
     if not unsettled:
         log.info("No unsettled orders to update.")
@@ -87,8 +116,11 @@ def update_settlements(kalshi: KalshiClient, db: Database):
         kalshi_order_id = order.get("kalshi_order_id", "")
 
         try:
-            # ── Phase 1: classify the order's current status ──────────────────
-            order_known_filled = False  # set True only if we should proceed to Phase 2
+            order_known_filled = False
+            # Defaults — used when we can't read real values from the API
+            fees_dollars = 0.0
+            fill_cost_dollars = None
+            filled_count = None
 
             if kalshi_order_id:
                 try:
@@ -110,10 +142,6 @@ def update_settlements(kalshi: KalshiClient, db: Database):
                         continue
 
                     if order_status == "partially_filled":
-                        # TODO: handle properly once filled_count is tracked.
-                        # For now, skip — the order will retry next run and
-                        # eventually time out via stale cleanup if it stays in
-                        # this state. Worth a manual look if this ever fires.
                         log.warning(
                             f"  ⚠ {ticker}: status='partially_filled' "
                             f"— needs manual review, skipping"
@@ -122,12 +150,12 @@ def update_settlements(kalshi: KalshiClient, db: Database):
 
                     if order_status in KNOWN_FILLED:
                         order_known_filled = True
-                        log.debug(
-                            f"  {ticker}: order status='{order_status}', "
-                            f"checking market result..."
+                        # Extract authoritative fee + fill data right here,
+                        # while we have the order response in scope.
+                        fees_dollars, fill_cost_dollars, filled_count = (
+                            extract_fill_data(kalshi_order)
                         )
                     else:
-                        # Unknown / new status — quarantine, don't guess
                         log.warning(
                             f"  ⚠ {ticker}: unexpected status='{order_status}' "
                             f"— skipping, will retry next run"
@@ -135,37 +163,57 @@ def update_settlements(kalshi: KalshiClient, db: Database):
                         continue
 
                 except Exception as e:
-                    # API failure on the status check — fall through to market
-                    # result lookup as a best-effort. If the market has settled,
-                    # we'll record P&L; otherwise the order stays pending.
                     log.warning(
                         f"  {ticker}: could not fetch order ({e}), "
                         f"falling back to market result check..."
                     )
-                    order_known_filled = True  # best-effort: assume filled
-
+                    order_known_filled = True
             else:
-                # No kalshi_order_id stored — old data or insert race.
-                # Best-effort: try to settle against the market result.
                 log.debug(f"  {ticker}: no kalshi_order_id, trying market result")
                 order_known_filled = True
 
-            # Skip Phase 2 if we couldn't confirm the order should be settled
             if not order_known_filled:
                 continue
 
-            # ── Phase 2: resolve filled order against market outcome ──────────
+            # Phase 2: resolve filled order against market outcome
             market = kalshi.get_market(ticker)
             result = market.get("result", "")
 
             if result in ("yes", "no"):
-                entry_price = float(order.get("order_price_dollars") or 0)
-                payout = 1.0 if result == "yes" else 0.0
-                pnl = payout - entry_price
-                db.update_settlement(order["id"], result, payout, pnl)
+                # If we got real fill cost, use it. Otherwise fall back to
+                # the limit price (existing behavior for orders without
+                # kalshi_order_id, or where get_order failed).
+                effective_fill_cost = (
+                    fill_cost_dollars
+                    if fill_cost_dollars is not None
+                    else float(order.get("order_price_dollars") or 0)
+                )
+                effective_count = (
+                    filled_count
+                    if filled_count is not None
+                    else int(order.get("contracts") or 1)
+                )
+
+                # Payout: $1 per filled YES contract that wins, $0 otherwise
+                payout = (1.0 if result == "yes" else 0.0) * effective_count
+                # Gross P&L: payout - cost (fees subtracted in the view)
+                pnl = round(payout - effective_fill_cost, 4)
+                net_pnl = round(pnl - fees_dollars, 4)
+
+                db.update_settlement(
+                    order_id=order["id"],
+                    result=result,
+                    payout_dollars=payout,
+                    pnl_dollars=pnl,
+                    fees_dollars=fees_dollars,
+                    fill_cost_dollars=fill_cost_dollars,
+                    filled_count=filled_count,
+                )
                 log.info(
                     f"  ✓ {ticker}: {result.upper()} | "
-                    f"entry=${entry_price:.2f} payout=${payout:.2f} pnl=${pnl:+.4f}"
+                    f"fill_cost=${effective_fill_cost:.4f} payout=${payout:.4f} "
+                    f"gross=${pnl:+.4f} fees=${fees_dollars:.4f} "
+                    f"net=${net_pnl:+.4f}"
                 )
             else:
                 log.debug(
@@ -174,8 +222,6 @@ def update_settlements(kalshi: KalshiClient, db: Database):
 
         except Exception as e:
             log.warning(f"  Could not process {ticker}: {e}")
-
-
 
 
 # ── Main bot run ──────────────────────────────────────────────────────────────
@@ -194,10 +240,8 @@ def run():
         log.info(f"  Excluded categories: {', '.join(config.excluded_categories)}")
     log.info(f"{'='*55}")
 
-    # ── Step 1: Update past settlements (includes stale-order cleanup) ────────
     update_settlements(kalshi, db)
 
-    # ── Step 2: Check today's budget ──────────────────────────────────────────
     todays_spend = db.get_todays_spend()
     remaining_budget = config.daily_spend_limit - todays_spend
     log.info(
@@ -210,9 +254,7 @@ def run():
         kalshi.close()
         return
 
-    # ── Step 3: Fetch markets ─────────────────────────────────────────────────
     now_ts = int(datetime.now(timezone.utc).timestamp())
-    # min_close_ts = now so we don't catch markets that already closed
     min_close_ts = now_ts
     max_close_ts = now_ts + (config.hours_to_close * 3600)
 
@@ -229,7 +271,6 @@ def run():
 
     log.info(f"Total markets returned: {len(markets)}")
 
-    # ── Step 4: Apply filters ─────────────────────────────────────────────────
     already_ordered = db.get_todays_tickers()
     qualifying = []
     reject_counts: dict[str, int] = {}
@@ -246,7 +287,6 @@ def run():
     if reject_counts:
         log.info(f"Rejection breakdown: {reject_counts}")
 
-    # ── Step 5: Create run record ─────────────────────────────────────────────
     run_id = db.insert_run(
         {
             "run_at": datetime.now(timezone.utc).isoformat(),
@@ -259,19 +299,15 @@ def run():
         }
     )
 
-    # ── Step 6: Place orders ──────────────────────────────────────────────────
     orders_placed = 0
     session_spend = 0.0
 
     for market, midpoint in qualifying:
         ticker = market["ticker"]
 
-        # Compute the ACTUAL price we'll bid at (rounded up per ROUND_UP_CENTS)
-        # before doing anything else, so the budget check matches reality.
         yes_price_cents = midpoint_to_cents(midpoint, round_up=ROUND_UP_CENTS)
         order_cost = (yes_price_cents / 100) * config.contracts_per_order
 
-        # Stop if adding this order would exceed the daily limit
         if todays_spend + session_spend + order_cost > config.daily_spend_limit:
             log.info(
                 f"Next order (${order_cost:.4f}) would exceed daily limit. Stopping."
@@ -318,7 +354,6 @@ def run():
         except Exception as e:
             log.error(f"  ✗ Order failed for {ticker}: {e}")
 
-    # ── Step 7: Finalize run record ───────────────────────────────────────────
     db.update_run(
         run_id,
         {

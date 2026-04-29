@@ -70,8 +70,7 @@ class Database:
         """
         Orders that have passed their close_time but haven't received a
         settlement_result yet — AND closed within the last
-        SETTLEMENT_GIVEUP_DAYS days. Anything older is handled by
-        get_stale_unsettled_orders() to prevent infinite retry.
+        SETTLEMENT_GIVEUP_DAYS days.
         """
         now = datetime.now(timezone.utc)
         cutoff_iso = (now - timedelta(days=SETTLEMENT_GIVEUP_DAYS)).isoformat()
@@ -89,7 +88,6 @@ class Database:
         """
         Orders past the giveup threshold (close_time more than
         SETTLEMENT_GIVEUP_DAYS ago) that still have no settlement_result.
-        These are zombies — Kalshi never resolved them and probably never will.
         """
         cutoff_iso = (
             datetime.now(timezone.utc) - timedelta(days=SETTLEMENT_GIVEUP_DAYS)
@@ -104,35 +102,30 @@ class Database:
         return result.data or []
 
     def mark_order_cancelled(self, order_id: str):
-        """
-        Mark an order that expired without filling.
-        P&L is zero — no money was spent, no position was opened.
-        """
         self.client.table("orders").update(
             {
                 "status": "cancelled",
                 "settlement_result": "cancelled",
                 "payout_dollars": 0.0,
                 "pnl_dollars": 0.0,
+                "fees_dollars": 0.0,
+                "fill_cost_dollars": 0.0,
+                "filled_count": 0,
                 "settled_at": datetime.now(timezone.utc).isoformat(),
             }
         ).eq("id", order_id).execute()
         log.info(f"Order {order_id} marked cancelled (expired unfilled — pnl=$0.00)")
 
     def mark_order_unknown(self, order_id: str):
-        """
-        Stop trying to settle an order that's too old to bother with.
-        We don't know what happened to it — Kalshi never resolved it.
-        P&L is recorded as 0 (best guess: order never actually filled,
-        but we can't be certain). Distinct from 'cancelled' so we can
-        spot these later if they start piling up.
-        """
         self.client.table("orders").update(
             {
                 "status": "unknown",
                 "settlement_result": "unknown",
                 "payout_dollars": 0.0,
                 "pnl_dollars": 0.0,
+                "fees_dollars": 0.0,
+                "fill_cost_dollars": 0.0,
+                "filled_count": 0,
                 "settled_at": datetime.now(timezone.utc).isoformat(),
             }
         ).eq("id", order_id).execute()
@@ -147,16 +140,40 @@ class Database:
         result: str,
         payout_dollars: float,
         pnl_dollars: float,
+        fees_dollars: float = 0.0,
+        fill_cost_dollars: float | None = None,
+        filled_count: int | None = None,
     ):
-        self.client.table("orders").update(
-            {
-                "settlement_result": result,
-                "payout_dollars": payout_dollars,
-                "pnl_dollars": pnl_dollars,
-                "settled_at": datetime.now(timezone.utc).isoformat(),
-            }
-        ).eq("id", order_id).execute()
+        """
+        Record settlement outcome with authoritative fee + fill data from Kalshi.
+
+        Args:
+            order_id          : DB row UUID
+            result            : 'yes' | 'no'
+            payout_dollars    : $1 per yes contract, $0 per no contract,
+                                multiplied by filled_count (Kalshi-derived)
+            pnl_dollars       : Gross P&L = payout - fill_cost (PRE-FEE)
+            fees_dollars      : Total fees Kalshi charged (taker + maker, from order)
+            fill_cost_dollars : What we actually paid (sum of taker+maker fill cost)
+            filled_count      : Actual contracts filled
+        """
+        update_data = {
+            "settlement_result": result,
+            "payout_dollars": payout_dollars,
+            "pnl_dollars": pnl_dollars,
+            "fees_dollars": fees_dollars,
+            "settled_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if fill_cost_dollars is not None:
+            update_data["fill_cost_dollars"] = fill_cost_dollars
+        if filled_count is not None:
+            update_data["filled_count"] = filled_count
+
+        self.client.table("orders").update(update_data).eq("id", order_id).execute()
+
+        net_pnl = pnl_dollars - fees_dollars
         log.info(
             f"Order {order_id} settled: {result.upper()} | "
-            f"payout=${payout_dollars:.4f} | pnl=${pnl_dollars:+.4f}"
+            f"payout=${payout_dollars:.4f} | gross_pnl=${pnl_dollars:+.4f} | "
+            f"fees=${fees_dollars:.4f} | net_pnl=${net_pnl:+.4f}"
         )
