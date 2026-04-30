@@ -6,9 +6,6 @@ from config import Config
 log = logging.getLogger(__name__)
 
 # After this many days past close_time with no settlement, give up trying.
-# Kalshi normally settles within 1-15 hours, with combo/manual review markets
-# taking up to ~72 hours. Past 7 days something is genuinely wrong (voided
-# market, account issue, etc.) and retrying every run is just noise.
 SETTLEMENT_GIVEUP_DAYS = 7
 
 
@@ -19,10 +16,38 @@ class Database:
         )
         log.info("Database client initialized")
 
-    # ── Daily budget tracking ──────────────────────────────────────────────────
+    # ── Bot configuration ─────────────────────────────────────────────────────
+
+    def is_trading_enabled(self) -> bool:
+        """
+        Read the kill switch from bot_config.
+
+        Defaults to True (enabled) if the row is missing or unreadable.
+        Fail-safe direction: a misconfigured config table shouldn't silently
+        stop a $10/day trading bot. If you want to disable, do it deliberately.
+        """
+        try:
+            result = (
+                self.client.table("bot_config")
+                .select("value")
+                .eq("key", "trading_enabled")
+                .execute()
+            )
+            if not result.data:
+                log.warning(
+                    "bot_config has no 'trading_enabled' row — defaulting to enabled"
+                )
+                return True
+            return result.data[0]["value"].lower() == "true"
+        except Exception as e:
+            log.warning(
+                f"Could not read bot_config ({e}) — defaulting to enabled"
+            )
+            return True
+
+    # ── Daily budget tracking ─────────────────────────────────────────────────
 
     def get_todays_spend(self) -> float:
-        """Sum of order_price_dollars for all orders placed today (UTC)."""
         today_iso = datetime.now(timezone.utc).date().isoformat()
         result = (
             self.client.table("orders")
@@ -35,7 +60,6 @@ class Database:
         return 0.0
 
     def get_todays_tickers(self) -> set:
-        """Return the set of tickers already ordered today (prevents duplicates)."""
         today_iso = datetime.now(timezone.utc).date().isoformat()
         result = (
             self.client.table("orders")
@@ -45,10 +69,9 @@ class Database:
         )
         return {r["ticker"] for r in (result.data or [])}
 
-    # ── Run records ────────────────────────────────────────────────────────────
+    # ── Run records ───────────────────────────────────────────────────────────
 
     def insert_run(self, run_data: dict) -> str:
-        """Insert a new run record and return its UUID."""
         result = self.client.table("runs").insert(run_data).execute()
         run_id = result.data[0]["id"]
         log.info(f"Run record created: {run_id}")
@@ -57,21 +80,15 @@ class Database:
     def update_run(self, run_id: str, updates: dict):
         self.client.table("runs").update(updates).eq("id", run_id).execute()
 
-    # ── Order records ──────────────────────────────────────────────────────────
+    # ── Order records ─────────────────────────────────────────────────────────
 
     def insert_order(self, order_data: dict) -> str:
-        """Insert a placed order and return its UUID."""
         result = self.client.table("orders").insert(order_data).execute()
         return result.data[0]["id"]
 
-    # ── Settlement ─────────────────────────────────────────────────────────────
+    # ── Settlement ────────────────────────────────────────────────────────────
 
     def get_unsettled_orders(self) -> list[dict]:
-        """
-        Orders that have passed their close_time but haven't received a
-        settlement_result yet — AND closed within the last
-        SETTLEMENT_GIVEUP_DAYS days.
-        """
         now = datetime.now(timezone.utc)
         cutoff_iso = (now - timedelta(days=SETTLEMENT_GIVEUP_DAYS)).isoformat()
         result = (
@@ -85,10 +102,6 @@ class Database:
         return result.data or []
 
     def get_stale_unsettled_orders(self) -> list[dict]:
-        """
-        Orders past the giveup threshold (close_time more than
-        SETTLEMENT_GIVEUP_DAYS ago) that still have no settlement_result.
-        """
         cutoff_iso = (
             datetime.now(timezone.utc) - timedelta(days=SETTLEMENT_GIVEUP_DAYS)
         ).isoformat()
@@ -144,19 +157,6 @@ class Database:
         fill_cost_dollars: float | None = None,
         filled_count: int | None = None,
     ):
-        """
-        Record settlement outcome with authoritative fee + fill data from Kalshi.
-
-        Args:
-            order_id          : DB row UUID
-            result            : 'yes' | 'no'
-            payout_dollars    : $1 per yes contract, $0 per no contract,
-                                multiplied by filled_count (Kalshi-derived)
-            pnl_dollars       : Gross P&L = payout - fill_cost (PRE-FEE)
-            fees_dollars      : Total fees Kalshi charged (taker + maker, from order)
-            fill_cost_dollars : What we actually paid (sum of taker+maker fill cost)
-            filled_count      : Actual contracts filled
-        """
         update_data = {
             "settlement_result": result,
             "payout_dollars": payout_dollars,

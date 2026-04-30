@@ -49,7 +49,7 @@ const STALE_HOURS = 26;
 function LastRunBanner({ run }: { run: Run | null }) {
   if (!run) {
     return (
-      <div className="bg-gray-900 border border-gray-800 rounded-xl px-5 py-3 mb-6 flex items-center justify-between">
+      <div className="bg-gray-900 border border-gray-800 rounded-xl px-5 py-3 mb-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <span className="w-2 h-2 rounded-full bg-gray-500" />
           <span className="text-sm text-gray-400">No runs recorded yet</span>
@@ -72,7 +72,7 @@ function LastRunBanner({ run }: { run: Run | null }) {
 
   return (
     <div
-      className={`${bg} border ${border} rounded-xl px-5 py-3 mb-6 flex items-center justify-between flex-wrap gap-3`}
+      className={`${bg} border ${border} rounded-xl px-5 py-3 mb-4 flex items-center justify-between flex-wrap gap-3`}
     >
       <div className="flex items-center gap-3">
         <span className={`w-2 h-2 rounded-full ${dot}`} />
@@ -94,6 +94,110 @@ function LastRunBanner({ run }: { run: Run | null }) {
         </span>
         <span>{run.markets_evaluated} markets evaluated</span>
       </div>
+    </div>
+  );
+}
+
+// ── Kill Switch ──────────────────────────────────────────────────────────────
+// Reads bot_config.trading_enabled directly via the anon key (read-only),
+// writes via the /api/toggle-trading route (server-side, service key).
+
+function KillSwitch() {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Initial fetch of current state
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data, error: fetchError } = await supabase
+        .from("bot_config")
+        .select("value")
+        .eq("key", "trading_enabled")
+        .maybeSingle();
+
+      if (cancelled) return;
+
+      if (fetchError) {
+        setError(fetchError.message);
+        return;
+      }
+      // Default to true if the row is missing (matches bot's default)
+      setEnabled(data?.value?.toLowerCase() !== "false");
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function toggle() {
+    if (enabled === null || busy) return;
+
+    const next = !enabled;
+    const action = next ? "enable" : "disable";
+
+    if (!confirm(`Are you sure you want to ${action} trading?`)) return;
+
+    setBusy(true);
+    setError(null);
+
+    try {
+      const resp = await fetch("/api/toggle-trading", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: next }),
+      });
+      const json = await resp.json();
+      if (!resp.ok || !json.ok) {
+        throw new Error(json.error || `HTTP ${resp.status}`);
+      }
+      setEnabled(json.enabled);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Loading state
+  if (enabled === null && !error) {
+    return (
+      <div className="bg-gray-900 border border-gray-800 rounded-xl px-5 py-3 mb-6 flex items-center gap-3">
+        <span className="w-2 h-2 rounded-full bg-gray-600" />
+        <span className="text-sm text-gray-500">Loading kill switch…</span>
+      </div>
+    );
+  }
+
+  const dot = enabled ? "bg-emerald-500" : "bg-red-500";
+  const border = enabled ? "border-emerald-900/50" : "border-red-900";
+  const bg = enabled ? "bg-gray-900" : "bg-red-950/30";
+  const label = enabled ? "Trading enabled" : "Trading disabled";
+  const labelColor = enabled ? "text-gray-300" : "text-red-300";
+  const btnText = enabled ? "Disable" : "Enable";
+  const btnColor = enabled
+    ? "border-red-800 text-red-300 hover:bg-red-950/50"
+    : "border-emerald-800 text-emerald-300 hover:bg-emerald-950/50";
+
+  return (
+    <div
+      className={`${bg} border ${border} rounded-xl px-5 py-3 mb-6 flex items-center justify-between flex-wrap gap-3`}
+    >
+      <div className="flex items-center gap-3">
+        <span className={`w-2 h-2 rounded-full ${dot}`} />
+        <span className={`text-sm font-medium ${labelColor}`}>{label}</span>
+        {error && (
+          <span className="text-xs text-red-400">· error: {error}</span>
+        )}
+      </div>
+      <button
+        onClick={toggle}
+        disabled={busy}
+        className={`text-xs border rounded-lg px-3 py-1.5 transition disabled:opacity-40 ${btnColor}`}
+      >
+        {busy ? "Working…" : btnText}
+      </button>
     </div>
   );
 }
@@ -270,7 +374,6 @@ function OrdersTable({ orders }: { orders: Order[] }) {
               </tr>
             )}
             {orders.map((o) => {
-              // Net P&L: gross (pnl_dollars) minus fees
               const netPnl =
                 o.pnl_dollars == null
                   ? null
@@ -282,7 +385,6 @@ function OrdersTable({ orders }: { orders: Order[] }) {
                   ? "text-emerald-400"
                   : "text-red-400";
 
-              // Show actual fill cost per contract if available, else "—"
               const filledAtPerContract =
                 o.fill_cost_dollars != null && o.filled_count
                   ? `$${(o.fill_cost_dollars / o.filled_count).toFixed(2)}`
@@ -420,6 +522,7 @@ export default function DashboardPage() {
       </div>
 
       <LastRunBanner run={lastRun} />
+      <KillSwitch />
 
       {/* Stats Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
