@@ -10,7 +10,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
-import { supabase, Order, DailyPnl, LifetimeStats } from "../lib/supabase";
+import { supabase, Order, DailyPnl, LifetimeStats, Run } from "../lib/supabase";
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -30,7 +30,73 @@ const fmt = {
       hour: "2-digit",
       minute: "2-digit",
     }),
+  relative: (iso: string) => {
+    const ms = Date.now() - new Date(iso).getTime();
+    const min = Math.floor(ms / 60000);
+    if (min < 1) return "just now";
+    if (min < 60) return `${min} min ago`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr} hour${hr === 1 ? "" : "s"} ago`;
+    const day = Math.floor(hr / 24);
+    return `${day} day${day === 1 ? "" : "s"} ago`;
+  },
 };
+
+// ── Last Run Banner ──────────────────────────────────────────────────────────
+
+const STALE_HOURS = 26;
+
+function LastRunBanner({ run }: { run: Run | null }) {
+  if (!run) {
+    return (
+      <div className="bg-gray-900 border border-gray-800 rounded-xl px-5 py-3 mb-6 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <span className="w-2 h-2 rounded-full bg-gray-500" />
+          <span className="text-sm text-gray-400">No runs recorded yet</span>
+        </div>
+      </div>
+    );
+  }
+
+  const ageHours =
+    (Date.now() - new Date(run.run_at).getTime()) / (1000 * 60 * 60);
+  const isStale = ageHours > STALE_HOURS;
+
+  const dot = isStale ? "bg-red-500" : "bg-emerald-500";
+  const border = isStale ? "border-red-900" : "border-emerald-900/50";
+  const bg = isStale ? "bg-red-950/30" : "bg-gray-900";
+  const label = isStale
+    ? `⚠ Bot hasn't run in ${Math.floor(ageHours)} hours`
+    : `Bot is healthy`;
+  const labelColor = isStale ? "text-red-300" : "text-gray-300";
+
+  return (
+    <div
+      className={`${bg} border ${border} rounded-xl px-5 py-3 mb-6 flex items-center justify-between flex-wrap gap-3`}
+    >
+      <div className="flex items-center gap-3">
+        <span className={`w-2 h-2 rounded-full ${dot}`} />
+        <span className={`text-sm font-medium ${labelColor}`}>{label}</span>
+        <span className="text-xs text-gray-500">
+          · Last run {fmt.relative(run.run_at)}
+        </span>
+      </div>
+      <div className="text-xs text-gray-500 flex items-center gap-4">
+        <span>
+          <span className="text-gray-400 font-medium">{run.orders_placed}</span>{" "}
+          orders placed
+        </span>
+        <span>
+          <span className="text-gray-400 font-medium">
+            ${run.total_spent_dollars?.toFixed(2) ?? "0.00"}
+          </span>{" "}
+          spent
+        </span>
+        <span>{run.markets_evaluated} markets evaluated</span>
+      </div>
+    </div>
+  );
+}
 
 // ── Stat Card ─────────────────────────────────────────────────────────────────
 
@@ -93,7 +159,6 @@ function ResultBadge({ result }: { result: string | null }) {
 // ── P&L Chart ────────────────────────────────────────────────────────────────
 
 function PnLChart({ data }: { data: DailyPnl[] }) {
-  // Build cumulative P&L series (ascending by date)
   const sorted = [...data].sort((a, b) =>
     a.trade_date.localeCompare(b.trade_date)
   );
@@ -103,7 +168,6 @@ function PnLChart({ data }: { data: DailyPnl[] }) {
     return {
       date: d.trade_date,
       cumulative: parseFloat(cumulative.toFixed(4)),
-      daily: parseFloat(Number(d.realized_pnl).toFixed(4)),
     };
   });
 
@@ -112,7 +176,7 @@ function PnLChart({ data }: { data: DailyPnl[] }) {
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
       <h2 className="text-sm font-medium text-gray-400 mb-4">
-        Cumulative P&amp;L
+        Cumulative P&amp;L (after fees)
       </h2>
       <ResponsiveContainer width="100%" height={220}>
         <AreaChart data={chartData}>
@@ -182,11 +246,11 @@ function OrdersTable({ orders }: { orders: Order[] }) {
                 "Date",
                 "Market",
                 "Category",
-                "Entry",
-                "Midpoint",
-                "Spread",
+                "Limit",
+                "Filled @",
                 "Result",
-                "P&L",
+                "Fees",
+                "Net P&L",
               ].map((h) => (
                 <th
                   key={h}
@@ -200,25 +264,32 @@ function OrdersTable({ orders }: { orders: Order[] }) {
           <tbody className="divide-y divide-gray-800">
             {orders.length === 0 && (
               <tr>
-                <td
-                  colSpan={8}
-                  className="px-4 py-8 text-center text-gray-500"
-                >
+                <td colSpan={8} className="px-4 py-8 text-center text-gray-500">
                   No orders yet.
                 </td>
               </tr>
             )}
             {orders.map((o) => {
-              const spread =
-                o.yes_ask_dollars && o.yes_bid_dollars
-                  ? (o.yes_ask_dollars - o.yes_bid_dollars).toFixed(3)
-                  : "—";
-              const pnlColor =
+              // Net P&L: gross (pnl_dollars) minus fees
+              const netPnl =
                 o.pnl_dollars == null
+                  ? null
+                  : o.pnl_dollars - (o.fees_dollars ?? 0);
+              const pnlColor =
+                netPnl == null
                   ? "text-gray-400"
-                  : o.pnl_dollars >= 0
+                  : netPnl >= 0
                   ? "text-emerald-400"
                   : "text-red-400";
+
+              // Show actual fill cost per contract if available, else "—"
+              const filledAtPerContract =
+                o.fill_cost_dollars != null && o.filled_count
+                  ? `$${(o.fill_cost_dollars / o.filled_count).toFixed(2)}`
+                  : o.fill_cost_dollars === 0
+                  ? "$0.00"
+                  : "—";
+
               return (
                 <tr key={o.id} className="hover:bg-gray-800/40 transition">
                   <td className="px-4 py-3 text-gray-400 whitespace-nowrap">
@@ -248,16 +319,18 @@ function OrdersTable({ orders }: { orders: Order[] }) {
                     ${o.order_price_dollars?.toFixed(2) ?? "—"}
                   </td>
                   <td className="px-4 py-3 font-mono text-gray-400 text-xs whitespace-nowrap">
-                    ${o.midpoint_dollars?.toFixed(4) ?? "—"}
-                  </td>
-                  <td className="px-4 py-3 font-mono text-gray-500 text-xs">
-                    {spread !== "—" ? `$${spread}` : "—"}
+                    {filledAtPerContract}
                   </td>
                   <td className="px-4 py-3">
                     <ResultBadge result={o.settlement_result} />
                   </td>
+                  <td className="px-4 py-3 font-mono text-gray-500 text-xs whitespace-nowrap">
+                    {o.fees_dollars != null
+                      ? `$${o.fees_dollars.toFixed(4)}`
+                      : "—"}
+                  </td>
                   <td className={`px-4 py-3 font-mono font-medium ${pnlColor}`}>
-                    {fmt.dollars(o.pnl_dollars)}
+                    {fmt.dollars(netPnl)}
                   </td>
                 </tr>
               );
@@ -275,12 +348,13 @@ export default function DashboardPage() {
   const [stats, setStats] = useState<LifetimeStats | null>(null);
   const [dailyPnl, setDailyPnl] = useState<DailyPnl[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
+  const [lastRun, setLastRun] = useState<Run | null>(null);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<string>("");
 
   async function load() {
     setLoading(true);
-    const [statsRes, dailyRes, ordersRes] = await Promise.all([
+    const [statsRes, dailyRes, ordersRes, runsRes] = await Promise.all([
       supabase.from("lifetime_stats").select("*").single(),
       supabase
         .from("daily_pnl")
@@ -292,10 +366,16 @@ export default function DashboardPage() {
         .select("*")
         .order("created_at", { ascending: false })
         .limit(200),
+      supabase
+        .from("runs")
+        .select("*")
+        .order("run_at", { ascending: false })
+        .limit(1),
     ]);
     if (statsRes.data) setStats(statsRes.data);
     if (dailyRes.data) setDailyPnl(dailyRes.data);
     if (ordersRes.data) setOrders(ordersRes.data);
+    if (runsRes.data && runsRes.data.length > 0) setLastRun(runsRes.data[0]);
     setLastUpdated(new Date().toLocaleTimeString());
     setLoading(false);
   }
@@ -310,6 +390,13 @@ export default function DashboardPage() {
       : stats.total_pnl >= 0
       ? "text-emerald-400"
       : "text-red-400";
+
+  const preFeeStr =
+    stats?.total_pnl_pre_fees != null
+      ? `${stats.total_pnl_pre_fees >= 0 ? "+" : ""}$${Math.abs(
+          stats.total_pnl_pre_fees
+        ).toFixed(2)} pre-fee`
+      : "";
 
   return (
     <div className="min-h-screen px-4 py-8 max-w-7xl mx-auto">
@@ -331,6 +418,8 @@ export default function DashboardPage() {
           {loading ? "Loading…" : `Refresh · ${lastUpdated}`}
         </button>
       </div>
+
+      <LastRunBanner run={lastRun} />
 
       {/* Stats Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
@@ -354,19 +443,25 @@ export default function DashboardPage() {
           }
         />
         <StatCard
-          label="Total P&L"
+          label="Net P&L"
           value={fmt.dollars(stats?.total_pnl)}
-          sub={`Spent: $${stats?.total_spent?.toFixed(2) ?? "0.00"}`}
+          sub={preFeeStr || `Spent: $${stats?.total_spent?.toFixed(2) ?? "0.00"}`}
           color={pnlColor}
         />
         <StatCard
-          label="Avg Entry Price"
+          label="Total Fees"
           value={
-            stats?.avg_entry_price != null
-              ? `$${stats.avg_entry_price.toFixed(3)}`
-              : "—"
+            stats?.total_fees != null ? `$${stats.total_fees.toFixed(2)}` : "—"
           }
-          sub="Per settled contract"
+          sub={
+            stats?.total_pnl_pre_fees != null && stats.total_pnl_pre_fees > 0
+              ? `${(
+                  (100 * (stats.total_fees ?? 0)) /
+                  stats.total_pnl_pre_fees
+                ).toFixed(1)}% of gross P&L`
+              : "Lifetime"
+          }
+          color="text-orange-300"
         />
       </div>
 
