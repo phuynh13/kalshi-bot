@@ -226,7 +226,7 @@ def run():
             }
         )
         log.info(f"{'='*55}")
-        log.info(f"  Run complete: trading disabled, 0 orders placed")
+        log.info("  Run complete: trading disabled, 0 orders placed")
         log.info(f"{'='*55}")
         kalshi.close()
         return
