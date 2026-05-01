@@ -18,7 +18,7 @@ export type Order = {
   yes_bid_dollars: number;
   yes_ask_dollars: number;
   midpoint_dollars: number;
-  order_price_dollars: number;       // limit price the bot bid at
+  order_price_dollars: number;
   contracts: number;
   status: string;
   close_time: string;
@@ -26,10 +26,10 @@ export type Order = {
   created_at: string;
   settlement_result: "yes" | "no" | "cancelled" | "unknown" | null;
   payout_dollars: number | null;
-  pnl_dollars: number | null;        // gross (pre-fee), based on real fill cost
-  fees_dollars: number | null;       // actual fees from Kalshi (taker + maker)
-  fill_cost_dollars: number | null;  // actual $ paid (vs limit price)
-  filled_count: number | null;       // actual contracts filled
+  pnl_dollars: number | null;
+  fees_dollars: number | null;
+  fill_cost_dollars: number | null;
+  filled_count: number | null;
   settled_at: string | null;
 };
 
@@ -42,6 +42,7 @@ export type Run = {
   total_spent_dollars: number;
   daily_limit_dollars: number;
   demo_mode: boolean;
+  rejection_breakdown: Record<string, number | string> | null;
 };
 
 export type DailyPnl = {
@@ -50,10 +51,10 @@ export type DailyPnl = {
   wins: number;
   losses: number;
   cancelled: number;
-  total_spent: number;                // uses real fill cost when available
+  total_spent: number;
   realized_pnl_pre_fees: number;
   daily_fees: number;
-  realized_pnl: number;               // fee-adjusted
+  realized_pnl: number;
   win_rate_pct: number | null;
 };
 
@@ -66,7 +67,7 @@ export type LifetimeStats = {
   total_losses: number;
   total_pnl_pre_fees: number;
   total_fees: number;
-  total_pnl: number;                  // net = gross - fees
+  total_pnl: number;
   total_spent: number;
   win_rate_pct: number | null;
   avg_entry_price: number | null;

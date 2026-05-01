@@ -84,7 +84,7 @@ function LastRunBanner({ run }: { run: Run | null }) {
       <div className="text-xs text-gray-500 flex items-center gap-4">
         <span>
           <span className="text-gray-400 font-medium">{run.orders_placed}</span>{" "}
-          orders placed
+          placed
         </span>
         <span>
           <span className="text-gray-400 font-medium">
@@ -92,22 +92,19 @@ function LastRunBanner({ run }: { run: Run | null }) {
           </span>{" "}
           spent
         </span>
-        <span>{run.markets_evaluated} markets evaluated</span>
+        <span>{run.markets_evaluated} evaluated</span>
       </div>
     </div>
   );
 }
 
 // ── Kill Switch ──────────────────────────────────────────────────────────────
-// Reads bot_config.trading_enabled directly via the anon key (read-only),
-// writes via the /api/toggle-trading route (server-side, service key).
 
 function KillSwitch() {
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Initial fetch of current state
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -123,7 +120,6 @@ function KillSwitch() {
         setError(fetchError.message);
         return;
       }
-      // Default to true if the row is missing (matches bot's default)
       setEnabled(data?.value?.toLowerCase() !== "false");
     })();
     return () => {
@@ -133,15 +129,12 @@ function KillSwitch() {
 
   async function toggle() {
     if (enabled === null || busy) return;
-
     const next = !enabled;
     const action = next ? "enable" : "disable";
-
     if (!confirm(`Are you sure you want to ${action} trading?`)) return;
 
     setBusy(true);
     setError(null);
-
     try {
       const resp = await fetch("/api/toggle-trading", {
         method: "POST",
@@ -149,9 +142,7 @@ function KillSwitch() {
         body: JSON.stringify({ enabled: next }),
       });
       const json = await resp.json();
-      if (!resp.ok || !json.ok) {
-        throw new Error(json.error || `HTTP ${resp.status}`);
-      }
+      if (!resp.ok || !json.ok) throw new Error(json.error || `HTTP ${resp.status}`);
       setEnabled(json.enabled);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unknown error");
@@ -160,7 +151,6 @@ function KillSwitch() {
     }
   }
 
-  // Loading state
   if (enabled === null && !error) {
     return (
       <div className="bg-gray-900 border border-gray-800 rounded-xl px-5 py-3 mb-6 flex items-center gap-3">
@@ -187,9 +177,7 @@ function KillSwitch() {
       <div className="flex items-center gap-3">
         <span className={`w-2 h-2 rounded-full ${dot}`} />
         <span className={`text-sm font-medium ${labelColor}`}>{label}</span>
-        {error && (
-          <span className="text-xs text-red-400">· error: {error}</span>
-        )}
+        {error && <span className="text-xs text-red-400">· error: {error}</span>}
       </div>
       <button
         onClick={toggle}
@@ -198,6 +186,183 @@ function KillSwitch() {
       >
         {busy ? "Working…" : btnText}
       </button>
+    </div>
+  );
+}
+
+// ── Run Funnel Breakdown ─────────────────────────────────────────────────────
+// Shows the full pipeline: markets evaluated → qualified → placed.
+// Click to expand for rejection reasons + placement-loop outcomes.
+
+function RunFunnel({
+  run,
+  ordersForRun,
+}: {
+  run: Run | null;
+  ordersForRun: Order[];
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  if (!run) return null;
+
+  const evaluated = run.markets_evaluated ?? 0;
+  const qualified = run.orders_attempted ?? 0;
+  const placed = run.orders_placed ?? 0;
+
+  // Compute spread + midpoint stats from the actual placed orders for this run
+  const spreads: number[] = [];
+  const midpoints: number[] = [];
+  for (const o of ordersForRun) {
+    if (o.yes_ask_dollars && o.yes_bid_dollars) {
+      spreads.push(o.yes_ask_dollars - o.yes_bid_dollars);
+    }
+    if (o.midpoint_dollars) midpoints.push(o.midpoint_dollars);
+  }
+  const avg = (arr: number[]) =>
+    arr.length === 0 ? null : arr.reduce((a, b) => a + b, 0) / arr.length;
+  const min = (arr: number[]) =>
+    arr.length === 0 ? null : Math.min(...arr);
+  const max = (arr: number[]) =>
+    arr.length === 0 ? null : Math.max(...arr);
+
+  const avgSpread = avg(spreads);
+  const minSpread = min(spreads);
+  const maxSpread = max(spreads);
+  const avgMidpoint = avg(midpoints);
+  const minMidpoint = min(midpoints);
+  const maxMidpoint = max(midpoints);
+
+  // Sort rejection_breakdown into filter-rejections vs placement-outcomes for display
+  const breakdown = run.rejection_breakdown ?? {};
+  const placementKeys = new Set([
+    "placed",
+    "failed",
+    "stopped_at_budget",
+    "not_reached",
+  ]);
+  const filterReasons: [string, number | string][] = [];
+  const placementOutcomes: [string, number | string][] = [];
+  for (const [k, v] of Object.entries(breakdown)) {
+    if (placementKeys.has(k)) placementOutcomes.push([k, v]);
+    else filterReasons.push([k, v]);
+  }
+  // Sort filter reasons by count descending
+  filterReasons.sort((a, b) => Number(b[1]) - Number(a[1]));
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl mb-6 overflow-hidden">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full px-5 py-4 flex items-center justify-between hover:bg-gray-800/40 transition"
+      >
+        <div className="flex items-center gap-3 flex-wrap">
+          <h2 className="text-sm font-medium text-gray-400">
+            Last run pipeline
+          </h2>
+          <div className="flex items-center gap-2 text-sm font-mono">
+            <span className="text-gray-300">
+              {evaluated.toLocaleString()}
+            </span>
+            <span className="text-gray-600">→</span>
+            <span className="text-indigo-400">{qualified.toLocaleString()}</span>
+            <span className="text-gray-600">→</span>
+            <span className="text-emerald-400">{placed.toLocaleString()}</span>
+          </div>
+          <div className="text-xs text-gray-500">
+            evaluated → qualified → placed
+          </div>
+        </div>
+        <span className="text-xs text-gray-500">
+          {expanded ? "▲ collapse" : "▼ details"}
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="px-5 pb-5 border-t border-gray-800 grid grid-cols-1 md:grid-cols-3 gap-5 pt-4">
+          {/* Filter rejections */}
+          <div>
+            <h3 className="text-xs text-gray-500 uppercase tracking-wider mb-2">
+              Why markets were filtered out
+            </h3>
+            {filterReasons.length === 0 ? (
+              <p className="text-xs text-gray-600">No data (older run?)</p>
+            ) : (
+              <ul className="space-y-1.5 text-sm">
+                {filterReasons.map(([reason, count]) => (
+                  <li key={reason} className="flex items-center justify-between">
+                    <span className="text-gray-400 text-xs">
+                      {reason.replace(/_/g, " ")}
+                    </span>
+                    <span className="font-mono text-gray-300">
+                      {Number(count).toLocaleString()}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          {/* Placement outcomes */}
+          <div>
+            <h3 className="text-xs text-gray-500 uppercase tracking-wider mb-2">
+              Placement loop
+            </h3>
+            {placementOutcomes.length === 0 ? (
+              <p className="text-xs text-gray-600">No data (older run?)</p>
+            ) : (
+              <ul className="space-y-1.5 text-sm">
+                {placementOutcomes.map(([key, val]) => (
+                  <li key={key} className="flex items-center justify-between">
+                    <span className="text-gray-400 text-xs">
+                      {key.replace(/_/g, " ")}
+                    </span>
+                    <span className="font-mono text-gray-300">
+                      {String(val)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          {/* Stats from actual placed orders */}
+          <div>
+            <h3 className="text-xs text-gray-500 uppercase tracking-wider mb-2">
+              Placed-order stats
+            </h3>
+            {ordersForRun.length === 0 ? (
+              <p className="text-xs text-gray-600">No orders placed in this run</p>
+            ) : (
+              <ul className="space-y-1.5 text-sm">
+                <li className="flex items-center justify-between">
+                  <span className="text-gray-400 text-xs">midpoint range</span>
+                  <span className="font-mono text-gray-300 text-xs">
+                    ${minMidpoint?.toFixed(3)} – ${maxMidpoint?.toFixed(3)}
+                  </span>
+                </li>
+                <li className="flex items-center justify-between">
+                  <span className="text-gray-400 text-xs">avg midpoint</span>
+                  <span className="font-mono text-gray-300 text-xs">
+                    ${avgMidpoint?.toFixed(4)}
+                  </span>
+                </li>
+                <li className="flex items-center justify-between">
+                  <span className="text-gray-400 text-xs">spread range</span>
+                  <span className="font-mono text-gray-300 text-xs">
+                    ${minSpread?.toFixed(3)} – ${maxSpread?.toFixed(3)}
+                  </span>
+                </li>
+                <li className="flex items-center justify-between">
+                  <span className="text-gray-400 text-xs">avg spread</span>
+                  <span className="font-mono text-gray-300 text-xs">
+                    ${avgSpread?.toFixed(4)}
+                  </span>
+                </li>
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -486,6 +651,11 @@ export default function DashboardPage() {
     load();
   }, []);
 
+  // Filter to only orders belonging to the current/most-recent run
+  const ordersForLastRun = lastRun
+    ? orders.filter((o) => o.run_id === lastRun.id)
+    : [];
+
   const pnlColor =
     !stats || stats.total_pnl == null
       ? "text-white"
@@ -502,7 +672,6 @@ export default function DashboardPage() {
 
   return (
     <div className="min-h-screen px-4 py-8 max-w-7xl mx-auto">
-      {/* Header */}
       <div className="flex items-center justify-between mb-8">
         <div>
           <h1 className="text-2xl font-semibold text-white">
@@ -523,6 +692,7 @@ export default function DashboardPage() {
 
       <LastRunBanner run={lastRun} />
       <KillSwitch />
+      <RunFunnel run={lastRun} ordersForRun={ordersForLastRun} />
 
       {/* Stats Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
@@ -568,14 +738,12 @@ export default function DashboardPage() {
         />
       </div>
 
-      {/* P&L Chart */}
       {dailyPnl.length > 0 && (
         <div className="mb-6">
           <PnLChart data={dailyPnl} />
         </div>
       )}
 
-      {/* Orders Table */}
       <OrdersTable orders={orders} />
 
       <p className="text-center text-xs text-gray-700 mt-6">

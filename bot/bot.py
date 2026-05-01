@@ -12,7 +12,7 @@ Flow:
   5. Scan markets closing within 24 hours
   6. Filter by probability, spread, volume, category
   7. Place YES limit orders at midpoint price (up to daily limit)
-  8. Write run summary to Supabase
+  8. Write run summary to Supabase (now includes rejection breakdown for diagnostics)
 """
 
 import logging
@@ -202,18 +202,14 @@ def run():
         log.info(f"  Excluded categories: {', '.join(config.excluded_categories)}")
     log.info(f"{'='*55}")
 
-    # Step 1 & 2: Settlements always run, regardless of kill switch
     update_settlements(kalshi, db)
 
-    # Step 3: Kill switch check — gates ONLY new order placement
     trading_enabled = db.is_trading_enabled()
     if not trading_enabled:
         log.warning(
             "⚠ Kill switch is ON — trading_enabled=false. "
             "Settlements ran, but skipping new order placement."
         )
-        # Still write a runs row so the dashboard's "last run" banner stays
-        # current. orders_placed=0 makes the disabled state visible there too.
         db.insert_run(
             {
                 "run_at": datetime.now(timezone.utc).isoformat(),
@@ -223,6 +219,7 @@ def run():
                 "total_spent_dollars": 0,
                 "daily_limit_dollars": config.daily_spend_limit,
                 "demo_mode": config.demo_mode,
+                "rejection_breakdown": {"kill_switch": "active"},
             }
         )
         log.info(f"{'='*55}")
@@ -231,7 +228,6 @@ def run():
         kalshi.close()
         return
 
-    # Step 4: Budget check
     todays_spend = db.get_todays_spend()
     remaining_budget = config.daily_spend_limit - todays_spend
     log.info(
@@ -277,6 +273,15 @@ def run():
     if reject_counts:
         log.info(f"Rejection breakdown: {reject_counts}")
 
+    # Track placement-loop outcomes too — useful for diagnosing why budget
+    # wasn't fully spent (e.g., "16 placed, 4 failed, 32 not reached")
+    placement_outcomes = {
+        "placed": 0,
+        "failed": 0,
+        "stopped_at_budget": 0,
+        "not_reached": len(qualifying),
+    }
+
     run_id = db.insert_run(
         {
             "run_at": datetime.now(timezone.utc).isoformat(),
@@ -302,7 +307,11 @@ def run():
             log.info(
                 f"Next order (${order_cost:.4f}) would exceed daily limit. Stopping."
             )
+            placement_outcomes["stopped_at_budget"] = 1
             break
+
+        # We're attempting this market — decrement "not_reached"
+        placement_outcomes["not_reached"] -= 1
 
         try:
             order = kalshi.place_limit_order(
@@ -334,6 +343,7 @@ def run():
 
             orders_placed += 1
             session_spend += order_cost
+            placement_outcomes["placed"] += 1
             log.info(
                 f"  ✓ {ticker:40s} "
                 f"midpoint={midpoint:.4f} "
@@ -343,12 +353,17 @@ def run():
 
         except Exception as e:
             log.error(f"  ✗ Order failed for {ticker}: {e}")
+            placement_outcomes["failed"] += 1
+
+    # Combine market-filter rejections + placement-loop outcomes into one dict
+    full_breakdown = {**reject_counts, **placement_outcomes}
 
     db.update_run(
         run_id,
         {
             "orders_placed": orders_placed,
             "total_spent_dollars": round(session_spend, 4),
+            "rejection_breakdown": full_breakdown,
         },
     )
 
@@ -357,6 +372,7 @@ def run():
         f"  Run complete: {orders_placed} order(s) placed, "
         f"${session_spend:.4f} spent this session"
     )
+    log.info(f"  Placement: {placement_outcomes}")
     log.info(f"{'='*55}")
 
     kalshi.close()
