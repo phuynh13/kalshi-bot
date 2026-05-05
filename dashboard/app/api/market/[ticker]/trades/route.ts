@@ -56,8 +56,9 @@ export async function GET(
   const limit = Math.min(Math.max(rawLimit, 1), 100).toString();
 
   try {
-    const path = `/trade-api/v2/markets/${ticker}/trades`;
-    const data = await kalshiGet(path, { limit }) as { trades?: unknown[] };
+    // Ticker goes in query params, not the path
+    const path = `/trade-api/v2/markets/trades`;
+    const data = await kalshiGet(path, { ticker, limit }) as { trades?: unknown[] };
 
     return NextResponse.json({
       ok: true,
