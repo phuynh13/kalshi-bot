@@ -82,6 +82,60 @@ class KalshiClient:
 
         return markets
 
+    def get_events(
+        self,
+        max_close_ts: int,
+        min_close_ts: int | None = None,
+        status: str = "open",
+        page_size: int = 200,
+    ) -> list[dict]:
+        """
+        Fetch events for the same time window used to fetch markets.
+
+        Why this exists: Kalshi's market objects do not include a 'category'
+        field. The field audit confirmed this — 'category' is simply not in
+        the market endpoint response. Category lives on the parent event object.
+
+        This method is called once per run by build_category_lookup() in bot.py,
+        which returns a dict of event_ticker -> category for attaching to orders.
+
+        Each event dict includes at minimum:
+          - event_ticker (str)
+          - category (str): e.g. "Finance", "Economics", "Climate and Weather"
+          - title (str)
+        """
+        path = "/trade-api/v2/events"
+        events: list[dict] = []
+        cursor: str | None = None
+
+        while True:
+            params: dict = {
+                "status": status,
+                "limit": page_size,
+            }
+            if min_close_ts:
+                params["min_close_ts"] = min_close_ts
+            if max_close_ts:
+                params["max_close_ts"] = max_close_ts
+            if cursor:
+                params["cursor"] = cursor
+
+            resp = self.http.get(
+                f"{self.config.base_url}{path}",
+                headers=self._auth_headers("GET", path),
+                params=params,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            batch = data.get("events", [])
+            events.extend(batch)
+            cursor = data.get("cursor")
+            log.debug(f"Fetched {len(batch)} events (total so far: {len(events)})")
+            if not cursor:
+                break
+
+        return events
+
     def get_order(self, order_id: str) -> dict:
         path = f"/trade-api/v2/portfolio/orders/{order_id}"
         resp = self.http.get(
@@ -106,21 +160,17 @@ class KalshiClient:
         """
         Fetch all current open positions on the account.
 
-        Each position represents holdings in a single market. Includes:
-          - ticker, market_exposure (cost basis in cents), position (count of contracts)
-          - realized_pnl, fees_paid (cents)
-          - last_updated_ts
+        Kalshi field names (confirmed via debug):
+          - position_fp (str): net contract count as decimal string e.g. "1.00"
+                               Positive = YES side. "0.00" = resting order, not filled.
+          - market_exposure_dollars (str): cost basis already in dollars e.g. "0.660000"
+          - realized_pnl_dollars (str): realized P&L in dollars
+          - fees_paid_dollars (str): fees in dollars
+          - resting_orders_count (int): number of unfilled resting orders on this market
 
-        Position counts are positive for YES side, negative for NO side.
-        Since this bot only buys YES, all positions should be positive.
-
-        Note: this returns positions whose markets haven't yet settled. Once
-        a market resolves, its position drops off this list and shows up on
-        /portfolio/settlements instead.
+        Filter on parseFloat(position_fp) !== 0 to exclude resting-only positions.
         """
         path = "/trade-api/v2/portfolio/positions"
-        # Get up to 250 positions (Kalshi's default limit). For our $30/day bot
-        # we'll never have more than ~50 open at once, so no pagination needed.
         params = {"limit": 250, "settlement_status": "unsettled"}
         resp = self.http.get(
             f"{self.config.base_url}{path}",
@@ -129,8 +179,6 @@ class KalshiClient:
         )
         resp.raise_for_status()
         data = resp.json()
-        # Response has both market_positions (per-market) and event_positions.
-        # We want market_positions for individual ticker-level exposure.
         return data.get("market_positions", [])
 
     def get_balance(self) -> dict:
@@ -138,7 +186,7 @@ class KalshiClient:
         Fetch account balance and portfolio value.
 
         Returns:
-            { "balance": <cents>, "portfolio_value": <cents>, "updated_ts": <unix> }
+            { "balance": <cents int>, "portfolio_value": <cents int>, ... }
         """
         path = "/trade-api/v2/portfolio/balance"
         resp = self.http.get(

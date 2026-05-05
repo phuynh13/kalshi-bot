@@ -10,9 +10,10 @@ Flow:
   3. Check kill switch — if disabled, skip order placement (settlements still ran)
   4. Check today's remaining budget
   5. Scan markets closing within 24 hours
-  6. Filter by probability, spread, volume, category
-  7. Place YES limit orders at midpoint price (up to daily limit)
-  8. Write run summary to Supabase (now includes rejection breakdown for diagnostics)
+  6. Fetch events for the same window to build event_ticker -> category lookup
+  7. Filter by probability, spread, volume, category
+  8. Place YES limit orders at midpoint price (up to daily limit)
+  9. Write run summary to Supabase
 """
 
 import logging
@@ -188,37 +189,40 @@ def update_settlements(kalshi: KalshiClient, db: Database):
             log.warning(f"  Could not process {ticker}: {e}")
 
 
-def _debug_market_fields(markets: list[dict]):
+def build_category_lookup(
+    kalshi: KalshiClient,
+    max_close_ts: int,
+    min_close_ts: int,
+) -> dict[str, str]:
     """
-    ── DIAGNOSTIC: log the actual fields Kalshi returns on a market object.
+    Fetch events for the current time window and return event_ticker -> category.
 
-    This runs once per bot execution (on the first market in the batch) and
-    tells us:
-      1. Every field key the API returns — so we know the exact name for
-         "category", not a guess.
-      2. The actual value of market.get("category") — None, empty string,
-         or a real value.
+    Why this is needed: Kalshi's /markets endpoint does not include a 'category'
+    field (confirmed by field audit). Category is stored on the parent event.
+    We fetch events once per run and use this dict when inserting each order.
 
-    HOW TO USE:
-      Run the bot once normally. In the PythonAnywhere log (or console output)
-      look for lines starting with "FIELD AUDIT". They will show you the
-      exact field names. Then come back and update the `category` line in
-      the insert_order call below if needed.
-
-    REMOVE THIS FUNCTION (and the call below) once categories are populating
-    correctly in Supabase.
+    Fails safely: if the events fetch fails for any reason, returns an empty
+    dict and logs a warning. Orders will insert with empty category rather
+    than crashing the run.
     """
-    if not markets:
-        return
-    sample = markets[0]
-    log.info("=" * 55)
-    log.info("FIELD AUDIT — first market object from Kalshi API:")
-    log.info(f"  All keys: {sorted(sample.keys())}")
-    log.info(f"  category value: {sample.get('category')!r}")
-    log.info(f"  category_id value: {sample.get('category_id')!r}")
-    log.info(f"  series_ticker value: {sample.get('series_ticker')!r}")
-    log.info(f"  event_ticker value: {sample.get('event_ticker')!r}")
-    log.info("=" * 55)
+    try:
+        events = kalshi.get_events(
+            max_close_ts=max_close_ts,
+            min_close_ts=min_close_ts,
+        )
+        lookup = {
+            e.get("event_ticker", ""): e.get("category", "")
+            for e in events
+            if e.get("event_ticker")
+        }
+        log.info(f"Category lookup built: {len(lookup)} events")
+        return lookup
+    except Exception as e:
+        log.warning(
+            f"Could not fetch events for category lookup ({e}) — "
+            f"orders will have empty category this run"
+        )
+        return {}
 
 
 def run():
@@ -290,10 +294,9 @@ def run():
 
     log.info(f"Total markets returned: {len(markets)}")
 
-    # ── DIAGNOSTIC: log actual field names from Kalshi market objects ─────────
-    # Remove this call once you've confirmed the correct category field name.
-    _debug_market_fields(markets)
-    # ─────────────────────────────────────────────────────────────────────────
+    # Fetch events for the same window to get category labels.
+    # Markets don't include category — it's on the parent event object.
+    category_by_event = build_category_lookup(kalshi, max_close_ts, min_close_ts)
 
     already_ordered = db.get_todays_tickers()
     qualifying = []
@@ -357,20 +360,17 @@ def run():
             kalshi_order_id = order.get("order_id", "")
             order_status = order.get("status", "resting")
 
+            event_ticker = market.get("event_ticker", "")
+            category = category_by_event.get(event_ticker, "")
+
             db.insert_order(
                 {
                     "run_id": run_id,
                     "kalshi_order_id": kalshi_order_id,
                     "ticker": ticker,
-                    "event_ticker": market.get("event_ticker", ""),
+                    "event_ticker": event_ticker,
                     "market_title": market.get("title", ""),
-                    # ── category field ────────────────────────────────────────
-                    # Check FIELD AUDIT output in logs to confirm the right key.
-                    # If the audit shows "category" is always None/empty but
-                    # another field like "series_ticker" has the value you want,
-                    # update this line accordingly.
-                    "category": market.get("category", ""),
-                    # ─────────────────────────────────────────────────────────
+                    "category": category,
                     "yes_bid_dollars": float(market.get("yes_bid_dollars") or 0),
                     "yes_ask_dollars": float(market.get("yes_ask_dollars") or 0),
                     "midpoint_dollars": round(midpoint, 4),
@@ -387,6 +387,7 @@ def run():
             placement_outcomes["placed"] += 1
             log.info(
                 f"  ✓ {ticker:40s} "
+                f"cat={category or '—':20s} "
                 f"midpoint={midpoint:.4f} "
                 f"limit={yes_price_cents}¢ "
                 f"id={kalshi_order_id}"

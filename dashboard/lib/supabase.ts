@@ -90,14 +90,15 @@ export type CategoryStats = {
 // ── Live data (not from Supabase — comes from /api/positions) ──────────────────
 
 // Kalshi returns money values in cents. Position count is positive for YES, negative for NO.
-export type KalshiPosition = {
+export interface KalshiPosition {
   ticker: string;
-  position: number;            // contract count (+ for YES, - for NO)
-  market_exposure: number;     // cost basis in cents
-  realized_pnl: number;        // realized P&L on this market (cents)
-  fees_paid: number;           // fees paid on this market (cents)
-  resting_orders_count?: number;
-  last_updated_ts?: string;
+  position_fp: string;               // "1.00" — contract count as decimal string
+  market_exposure_dollars: string;   // "0.660000" — cost basis, already in dollars
+  realized_pnl_dollars: string;      // already in dollars
+  fees_paid_dollars: string;         // already in dollars
+  resting_orders_count: number;
+  last_updated_ts: string;
+  total_traded_dollars: string;
 };
 
 export type KalshiBalance = {

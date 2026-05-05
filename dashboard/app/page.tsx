@@ -53,8 +53,15 @@ const fmt = {
     const day = Math.floor(hr / 24);
     return `${day} day${day === 1 ? "" : "s"} ago`;
   },
+  // Balance endpoint returns integer cents
   centsToDollars: (cents: number | null | undefined) =>
     cents == null ? "—" : `$${(cents / 100).toFixed(2)}`,
+  // Position endpoint returns dollar strings like "0.660000"
+  dollarString: (s: string | null | undefined) => {
+    if (s == null) return "—";
+    const v = parseFloat(s);
+    return isNaN(v) ? "—" : `$${v.toFixed(2)}`;
+  },
 };
 
 // ── Last Run Banner ──────────────────────────────────────────────────────────
@@ -203,11 +210,20 @@ function KillSwitch() {
 }
 
 // ── Open Positions Panel ─────────────────────────────────────────────────────
+//
+// Kalshi position field names (confirmed via API debug, May 2026):
+//   position_fp              — string, e.g. "1.00". Count of contracts.
+//                              "0.00" means a resting order, not yet filled.
+//   market_exposure_dollars  — string, e.g. "0.660000". Cost basis in dollars.
+//   realized_pnl_dollars     — string, in dollars (not cents)
+//   fees_paid_dollars        — string, in dollars (not cents)
+//   resting_orders_count     — integer
+//
+// Balance endpoint (separate) returns integer cents as usual.
 
 function OpenPositionsPanel() {
   const [positions, setPositions] = useState<KalshiPosition[] | null>(null);
   const [balance, setBalance] = useState<KalshiBalance | null>(null);
-  const [rawDebug, setRawDebug] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -222,20 +238,15 @@ function OpenPositionsPanel() {
         throw new Error(json.error || `HTTP ${resp.status}`);
       }
 
-      // ── DEBUG: capture the raw first position so we can see the actual
-      // field names Kalshi returns. Remove this once positions display correctly.
-      if (json.positions?.length > 0) {
-        setRawDebug(JSON.stringify(json.positions[0], null, 2));
-      }
+      // Filter to positions with actual filled contracts.
+      // position_fp == "0.00" means a resting (unfilled) limit order —
+      // these are real positions but the order hasn't matched yet, so
+      // there's no actual contract exposure to display.
+      const activePositions = (json.positions as KalshiPosition[]).filter((p) => {
+        const count = parseFloat((p as any).position_fp ?? "0");
+        return !isNaN(count) && count !== 0;
+      });
 
-      const activePositions = (json.positions as KalshiPosition[]).filter(
-        (p) => {
-          // Guard: accept any positive-count field name we know about.
-          // Kalshi may use "position" or "quantity" — check both.
-          const count = p.position ?? (p as any).quantity ?? (p as any).contracts ?? 0;
-          return count !== 0;
-        }
-      );
       setPositions(activePositions);
       setBalance(json.balance);
     } catch (e) {
@@ -249,21 +260,27 @@ function OpenPositionsPanel() {
     load();
   }, []);
 
-  // Resolve position count defensively regardless of field name
-  function resolveCount(p: KalshiPosition): number {
-    return p.position ?? (p as any).quantity ?? (p as any).contracts ?? 0;
+  // Helpers to read the actual Kalshi field names.
+  // Using (p as any) because KalshiPosition in lib/supabase.ts may use
+  // old field names — update that type definition per the note below.
+  function getCount(p: KalshiPosition): number {
+    return parseFloat((p as any).position_fp ?? "0") || 0;
+  }
+  function getExposureDollars(p: KalshiPosition): number {
+    return parseFloat((p as any).market_exposure_dollars ?? "0") || 0;
+  }
+  function getRealizedPnlDollars(p: KalshiPosition): string {
+    return fmt.dollarString((p as any).realized_pnl_dollars);
+  }
+  function getFeesDollars(p: KalshiPosition): string {
+    return fmt.dollarString((p as any).fees_paid_dollars);
   }
 
-  // Resolve cost basis defensively (Kalshi returns cents)
-  function resolveExposure(p: KalshiPosition): number | null {
-    return p.market_exposure ?? (p as any).cost_basis ?? (p as any).exposure ?? null;
-  }
-
-  const totalExposureCents = positions
-    ? positions.reduce((sum, p) => sum + (resolveExposure(p) ?? 0), 0)
+  const totalExposureDollars = positions
+    ? positions.reduce((sum, p) => sum + getExposureDollars(p), 0)
     : 0;
   const totalContracts = positions
-    ? positions.reduce((sum, p) => sum + Math.abs(resolveCount(p)), 0)
+    ? positions.reduce((sum, p) => sum + Math.abs(getCount(p)), 0)
     : 0;
 
   return (
@@ -285,7 +302,7 @@ function OpenPositionsPanel() {
               <span className="text-gray-300">{totalContracts}</span>
               <span className="text-xs text-gray-500">contracts ·</span>
               <span className="text-gray-300">
-                {fmt.centsToDollars(totalExposureCents)}
+                ${totalExposureDollars.toFixed(2)}
               </span>
               <span className="text-xs text-gray-500">at risk</span>
             </div>
@@ -308,39 +325,21 @@ function OpenPositionsPanel() {
 
       {expanded && (
         <div className="px-5 pb-5 border-t border-gray-800 pt-4">
-          {/* ── DEBUG PANEL ─────────────────────────────────────────────────
-              Shows the raw first position object from Kalshi so you can see
-              the actual field names. Remove this block once positions display
-              correctly and you know the right field names.
-          ─────────────────────────────────────────────────────────────────── */}
-          {rawDebug && (
-            <div className="mb-4 p-3 bg-gray-950 border border-yellow-900/50 rounded-lg">
-              <p className="text-xs text-yellow-400 font-medium mb-1">
-                🔍 Debug: raw first position from Kalshi API
-              </p>
-              <pre className="text-xs text-gray-400 overflow-x-auto whitespace-pre-wrap">
-                {rawDebug}
-              </pre>
-              <p className="text-xs text-gray-600 mt-2">
-                Check the field names above. The position count field and cost
-                basis field may differ from what the code expects. Remove this
-                debug panel from OpenPositionsPanel once confirmed.
-              </p>
-            </div>
-          )}
-
           {error ? (
             <p className="text-xs text-red-400">
               Could not fetch positions: {error}
             </p>
           ) : positions === null || positions.length === 0 ? (
-            <p className="text-xs text-gray-500">No open positions.</p>
+            <p className="text-xs text-gray-500">
+              No filled positions. Orders may still be resting (limit orders
+              waiting to match). Filled contracts will appear here once matched.
+            </p>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-gray-800">
-                    {["Ticker", "Side", "Contracts", "Cost basis", "Realized", "Fees"].map((h) => (
+                    {["Ticker", "Side", "Contracts", "Cost basis", "Realized P&L", "Fees"].map((h) => (
                       <th
                         key={h}
                         className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"
@@ -352,17 +351,14 @@ function OpenPositionsPanel() {
                 </thead>
                 <tbody className="divide-y divide-gray-800">
                   {positions.map((p) => {
-                    const count = resolveCount(p);
-                    const exposure = resolveExposure(p);
+                    const count = getCount(p);
                     return (
                       <tr key={p.ticker} className="hover:bg-gray-800/40 transition">
                         <td className="px-3 py-2 font-mono text-xs text-indigo-400">
                           {p.ticker}
                         </td>
                         <td className="px-3 py-2 text-xs">
-                          <span
-                            className={count > 0 ? "text-emerald-400" : "text-red-400"}
-                          >
+                          <span className={count > 0 ? "text-emerald-400" : "text-red-400"}>
                             {count > 0 ? "YES" : "NO"}
                           </span>
                         </td>
@@ -370,13 +366,13 @@ function OpenPositionsPanel() {
                           {Math.abs(count)}
                         </td>
                         <td className="px-3 py-2 font-mono text-gray-300">
-                          {fmt.centsToDollars(exposure)}
+                          ${getExposureDollars(p).toFixed(2)}
                         </td>
                         <td className="px-3 py-2 font-mono text-gray-500 text-xs">
-                          {fmt.centsToDollars(p.realized_pnl)}
+                          {getRealizedPnlDollars(p)}
                         </td>
                         <td className="px-3 py-2 font-mono text-gray-500 text-xs">
-                          {fmt.centsToDollars(p.fees_paid)}
+                          {getFeesDollars(p)}
                         </td>
                       </tr>
                     );
@@ -545,10 +541,10 @@ function RunFunnel({
 
 // ── Win Rate by Entry Price (normalized to edge over implied odds) ─────────────
 //
-// KEY CONCEPT: If you buy YES at $0.70, the market already prices that at 70%
-// implied probability. Winning exactly 70% of the time = zero edge.
-// This chart shows:   actual_win_rate - implied_probability_at_entry
-// Positive bar = you're beating the market's prediction. Zero = breakeven.
+// KEY CONCEPT: buying YES at $0.70 means the market already prices that at 70%
+// implied probability. Winning 70% of the time at that price = zero edge.
+// This chart shows: actual_win_rate - implied_probability_at_entry_price
+// Positive = you're beating the market's prediction. Zero = breakeven.
 
 const MIN_RELIABLE_SAMPLE = 10;
 const BUCKET_WIDTH = 0.05;
@@ -616,9 +612,7 @@ function WinRateByPriceChart({ orders }: { orders: Order[] }) {
 
   const hasData = buckets.some((b) => b.total > 0);
 
-  const edges = buckets
-    .filter((b) => b.edge !== null)
-    .map((b) => b.edge as number);
+  const edges = buckets.filter((b) => b.edge !== null).map((b) => b.edge as number);
   const maxAbs = edges.length > 0 ? Math.max(30, ...edges.map(Math.abs)) : 30;
   const yDomain: [number, number] = [
     -Math.ceil(maxAbs / 5) * 5,
@@ -636,9 +630,8 @@ function WinRateByPriceChart({ orders }: { orders: Order[] }) {
         </span>
       </div>
       <p className="text-xs text-gray-600 mb-4">
-        Actual win rate minus the market's implied probability at each entry
-        price. Zero = you're getting exactly what the market predicted.
-        Positive = you have an edge.
+        Actual win rate minus the market's implied probability at each entry price.
+        Zero = exactly what the market predicted. Positive = you have an edge.
       </p>
 
       {!hasData ? (
@@ -696,7 +689,6 @@ function WinRateByPriceChart({ orders }: { orders: Order[] }) {
                 ];
               }}
             />
-            {/* Zero line = no edge baseline */}
             <ReferenceLine y={0} stroke="#6b7280" strokeWidth={1} />
             <ReferenceLine y={10} stroke="#1f2937" strokeDasharray="3 3" />
             <ReferenceLine y={-10} stroke="#1f2937" strokeDasharray="3 3" />
@@ -964,7 +956,6 @@ function OrdersTable({ orders }: { orders: Order[] }) {
   const totalPages = Math.max(1, Math.ceil(orders.length / PAGE_SIZE));
   const pageOrders = orders.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
-  // Reset to first page if the order list changes (e.g. after a refresh)
   useEffect(() => {
     setPage(0);
   }, [orders.length]);
@@ -977,8 +968,7 @@ function OrdersTable({ orders }: { orders: Order[] }) {
           <p className="text-xs text-gray-600 mt-0.5">
             {orders.length.toLocaleString()} total · showing{" "}
             {orders.length === 0 ? 0 : page * PAGE_SIZE + 1}–
-            {Math.min((page + 1) * PAGE_SIZE, orders.length)} of{" "}
-            {orders.length}
+            {Math.min((page + 1) * PAGE_SIZE, orders.length)} of {orders.length}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -1219,7 +1209,6 @@ export default function DashboardPage() {
       <OpenPositionsPanel />
       <RunFunnel run={lastRun} ordersForRun={ordersForLastRun} />
 
-      {/* Stats Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
         <StatCard
           label="Total Orders"
@@ -1270,9 +1259,7 @@ export default function DashboardPage() {
       )}
 
       <WinRateByPriceChart orders={orders} />
-
       <CategoryBreakdown stats={categoryStats} />
-
       <OrdersTable orders={orders} />
 
       <p className="text-center text-xs text-gray-700 mt-6">
