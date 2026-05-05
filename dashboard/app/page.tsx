@@ -53,7 +53,6 @@ const fmt = {
     const day = Math.floor(hr / 24);
     return `${day} day${day === 1 ? "" : "s"} ago`;
   },
-  // Convert Kalshi's integer cents to a display dollar string
   centsToDollars: (cents: number | null | undefined) =>
     cents == null ? "—" : `$${(cents / 100).toFixed(2)}`,
 };
@@ -204,12 +203,11 @@ function KillSwitch() {
 }
 
 // ── Open Positions Panel ─────────────────────────────────────────────────────
-// Live exposure + balance pulled from Kalshi via /api/positions.
-// Shown collapsed by default; expand to see per-position breakdown.
 
 function OpenPositionsPanel() {
   const [positions, setPositions] = useState<KalshiPosition[] | null>(null);
   const [balance, setBalance] = useState<KalshiBalance | null>(null);
+  const [rawDebug, setRawDebug] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -223,9 +221,20 @@ function OpenPositionsPanel() {
       if (!resp.ok || !json.ok) {
         throw new Error(json.error || `HTTP ${resp.status}`);
       }
-      // Filter out positions with 0 contracts (these are settled-but-not-yet-removed)
+
+      // ── DEBUG: capture the raw first position so we can see the actual
+      // field names Kalshi returns. Remove this once positions display correctly.
+      if (json.positions?.length > 0) {
+        setRawDebug(JSON.stringify(json.positions[0], null, 2));
+      }
+
       const activePositions = (json.positions as KalshiPosition[]).filter(
-        (p) => p.position !== 0
+        (p) => {
+          // Guard: accept any positive-count field name we know about.
+          // Kalshi may use "position" or "quantity" — check both.
+          const count = p.position ?? (p as any).quantity ?? (p as any).contracts ?? 0;
+          return count !== 0;
+        }
       );
       setPositions(activePositions);
       setBalance(json.balance);
@@ -240,12 +249,21 @@ function OpenPositionsPanel() {
     load();
   }, []);
 
-  // Aggregate exposure across all open positions
+  // Resolve position count defensively regardless of field name
+  function resolveCount(p: KalshiPosition): number {
+    return p.position ?? (p as any).quantity ?? (p as any).contracts ?? 0;
+  }
+
+  // Resolve cost basis defensively (Kalshi returns cents)
+  function resolveExposure(p: KalshiPosition): number | null {
+    return p.market_exposure ?? (p as any).cost_basis ?? (p as any).exposure ?? null;
+  }
+
   const totalExposureCents = positions
-    ? positions.reduce((sum, p) => sum + (p.market_exposure ?? 0), 0)
+    ? positions.reduce((sum, p) => sum + (resolveExposure(p) ?? 0), 0)
     : 0;
   const totalContracts = positions
-    ? positions.reduce((sum, p) => sum + Math.abs(p.position ?? 0), 0)
+    ? positions.reduce((sum, p) => sum + Math.abs(resolveCount(p)), 0)
     : 0;
 
   return (
@@ -290,6 +308,27 @@ function OpenPositionsPanel() {
 
       {expanded && (
         <div className="px-5 pb-5 border-t border-gray-800 pt-4">
+          {/* ── DEBUG PANEL ─────────────────────────────────────────────────
+              Shows the raw first position object from Kalshi so you can see
+              the actual field names. Remove this block once positions display
+              correctly and you know the right field names.
+          ─────────────────────────────────────────────────────────────────── */}
+          {rawDebug && (
+            <div className="mb-4 p-3 bg-gray-950 border border-yellow-900/50 rounded-lg">
+              <p className="text-xs text-yellow-400 font-medium mb-1">
+                🔍 Debug: raw first position from Kalshi API
+              </p>
+              <pre className="text-xs text-gray-400 overflow-x-auto whitespace-pre-wrap">
+                {rawDebug}
+              </pre>
+              <p className="text-xs text-gray-600 mt-2">
+                Check the field names above. The position count field and cost
+                basis field may differ from what the code expects. Remove this
+                debug panel from OpenPositionsPanel once confirmed.
+              </p>
+            </div>
+          )}
+
           {error ? (
             <p className="text-xs text-red-400">
               Could not fetch positions: {error}
@@ -312,36 +351,36 @@ function OpenPositionsPanel() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-800">
-                  {positions.map((p) => (
-                    <tr key={p.ticker} className="hover:bg-gray-800/40 transition">
-                      <td className="px-3 py-2 font-mono text-xs text-indigo-400">
-                        {p.ticker}
-                      </td>
-                      <td className="px-3 py-2 text-xs">
-                        <span
-                          className={
-                            p.position > 0
-                              ? "text-emerald-400"
-                              : "text-red-400"
-                          }
-                        >
-                          {p.position > 0 ? "YES" : "NO"}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2 font-mono text-gray-300">
-                        {Math.abs(p.position)}
-                      </td>
-                      <td className="px-3 py-2 font-mono text-gray-300">
-                        {fmt.centsToDollars(p.market_exposure)}
-                      </td>
-                      <td className="px-3 py-2 font-mono text-gray-500 text-xs">
-                        {fmt.centsToDollars(p.realized_pnl)}
-                      </td>
-                      <td className="px-3 py-2 font-mono text-gray-500 text-xs">
-                        {fmt.centsToDollars(p.fees_paid)}
-                      </td>
-                    </tr>
-                  ))}
+                  {positions.map((p) => {
+                    const count = resolveCount(p);
+                    const exposure = resolveExposure(p);
+                    return (
+                      <tr key={p.ticker} className="hover:bg-gray-800/40 transition">
+                        <td className="px-3 py-2 font-mono text-xs text-indigo-400">
+                          {p.ticker}
+                        </td>
+                        <td className="px-3 py-2 text-xs">
+                          <span
+                            className={count > 0 ? "text-emerald-400" : "text-red-400"}
+                          >
+                            {count > 0 ? "YES" : "NO"}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 font-mono text-gray-300">
+                          {Math.abs(count)}
+                        </td>
+                        <td className="px-3 py-2 font-mono text-gray-300">
+                          {fmt.centsToDollars(exposure)}
+                        </td>
+                        <td className="px-3 py-2 font-mono text-gray-500 text-xs">
+                          {fmt.centsToDollars(p.realized_pnl)}
+                        </td>
+                        <td className="px-3 py-2 font-mono text-gray-500 text-xs">
+                          {fmt.centsToDollars(p.fees_paid)}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
               <div className="mt-3 flex justify-end">
@@ -504,45 +543,53 @@ function RunFunnel({
   );
 }
 
-// ── Win Rate by Entry Price Bucket ───────────────────────────────────────────
-// Bar chart: 5¢ buckets, win rate on Y axis, sample size as bar opacity.
-// Categories with <10 settled samples are de-emphasized as statistically noisy.
+// ── Win Rate by Entry Price (normalized to edge over implied odds) ─────────────
+//
+// KEY CONCEPT: If you buy YES at $0.70, the market already prices that at 70%
+// implied probability. Winning exactly 70% of the time = zero edge.
+// This chart shows:   actual_win_rate - implied_probability_at_entry
+// Positive bar = you're beating the market's prediction. Zero = breakeven.
 
 const MIN_RELIABLE_SAMPLE = 10;
-const BUCKET_WIDTH = 0.05; // 5¢ buckets
-const BUCKET_START = 0.55; // 55¢ — covers your 58–85% range with a buffer
+const BUCKET_WIDTH = 0.05;
+const BUCKET_START = 0.55;
 const BUCKET_END = 0.90;
 
 function WinRateByPriceChart({ orders }: { orders: Order[] }) {
   const buckets = useMemo(() => {
-    // Create bucket bins
     type Bucket = {
-      range: string;          // "$0.60–$0.65"
+      range: string;
       lower: number;
+      center: number;
       wins: number;
       losses: number;
       total: number;
       winRate: number | null;
+      impliedPct: number;
+      edge: number | null;
       reliable: boolean;
     };
+
     const bins: Bucket[] = [];
     for (let lower = BUCKET_START; lower < BUCKET_END; lower += BUCKET_WIDTH) {
       const upper = lower + BUCKET_WIDTH;
+      const center = lower + BUCKET_WIDTH / 2;
       bins.push({
         range: `$${lower.toFixed(2)}-$${upper.toFixed(2)}`,
         lower: parseFloat(lower.toFixed(2)),
+        center: parseFloat(center.toFixed(3)),
         wins: 0,
         losses: 0,
         total: 0,
         winRate: null,
+        impliedPct: parseFloat((center * 100).toFixed(1)),
+        edge: null,
         reliable: false,
       });
     }
 
-    // Count each settled order into its bucket using actual fill cost per contract
     for (const o of orders) {
       if (o.settlement_result !== "yes" && o.settlement_result !== "no") continue;
-      // Use per-contract fill price; fall back to limit price if fill data missing
       const price =
         o.fill_cost_dollars != null && o.filled_count
           ? o.fill_cost_dollars / o.filled_count
@@ -557,10 +604,10 @@ function WinRateByPriceChart({ orders }: { orders: Order[] }) {
       bucket.total++;
     }
 
-    // Compute win rate + reliability flag
     for (const b of bins) {
       if (b.total > 0) {
         b.winRate = (100 * b.wins) / b.total;
+        b.edge = parseFloat((b.winRate - b.impliedPct).toFixed(2));
         b.reliable = b.total >= MIN_RELIABLE_SAMPLE;
       }
     }
@@ -569,18 +616,29 @@ function WinRateByPriceChart({ orders }: { orders: Order[] }) {
 
   const hasData = buckets.some((b) => b.total > 0);
 
+  const edges = buckets
+    .filter((b) => b.edge !== null)
+    .map((b) => b.edge as number);
+  const maxAbs = edges.length > 0 ? Math.max(30, ...edges.map(Math.abs)) : 30;
+  const yDomain: [number, number] = [
+    -Math.ceil(maxAbs / 5) * 5,
+    Math.ceil(maxAbs / 5) * 5,
+  ];
+
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 mb-6">
       <div className="flex items-center justify-between mb-1">
         <h2 className="text-sm font-medium text-gray-400">
-          Win rate by entry price
+          Edge over implied odds
         </h2>
         <span className="text-xs text-gray-600">
           fade = small sample (&lt;{MIN_RELIABLE_SAMPLE})
         </span>
       </div>
       <p className="text-xs text-gray-600 mb-4">
-        Settled orders bucketed by actual fill price. Dashed line = breakeven at price (1−p).
+        Actual win rate minus the market's implied probability at each entry
+        price. Zero = you're getting exactly what the market predicted.
+        Positive = you have an edge.
       </p>
 
       {!hasData ? (
@@ -588,8 +646,8 @@ function WinRateByPriceChart({ orders }: { orders: Order[] }) {
           No settled orders yet.
         </p>
       ) : (
-        <ResponsiveContainer width="100%" height={240}>
-          <BarChart data={buckets}>
+        <ResponsiveContainer width="100%" height={260}>
+          <BarChart data={buckets} margin={{ top: 16, right: 8, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
             <XAxis
               dataKey="range"
@@ -599,11 +657,11 @@ function WinRateByPriceChart({ orders }: { orders: Order[] }) {
               interval={0}
             />
             <YAxis
-              domain={[0, 100]}
+              domain={yDomain}
               tick={{ fill: "#6b7280", fontSize: 11 }}
               tickLine={false}
               axisLine={false}
-              tickFormatter={(v) => `${v}%`}
+              tickFormatter={(v) => `${v > 0 ? "+" : ""}${v}%`}
             />
             <Tooltip
               contentStyle={{
@@ -612,24 +670,46 @@ function WinRateByPriceChart({ orders }: { orders: Order[] }) {
                 borderRadius: "8px",
                 fontSize: "12px",
               }}
-              formatter={(_v: number, _n: string, p: { payload: { wins: number; losses: number; total: number; winRate: number | null } }) => {
+              formatter={(
+                _v: number,
+                _n: string,
+                p: {
+                  payload: {
+                    wins: number;
+                    losses: number;
+                    total: number;
+                    winRate: number | null;
+                    impliedPct: number;
+                    edge: number | null;
+                  };
+                }
+              ) => {
                 const d = p.payload;
+                if (d.total === 0) return ["No data", ""];
+                const edgeStr =
+                  d.edge != null
+                    ? `${d.edge >= 0 ? "+" : ""}${d.edge.toFixed(1)}%`
+                    : "—";
                 return [
-                  `${d.winRate?.toFixed(1) ?? "—"}% (${d.wins}W / ${d.losses}L, n=${d.total})`,
-                  "Win rate",
+                  `Edge: ${edgeStr}\nActual: ${d.winRate?.toFixed(1) ?? "—"}%  Implied: ${d.impliedPct}%\n${d.wins}W / ${d.losses}L  (n=${d.total})`,
+                  "",
                 ];
               }}
             />
-            {/* Reference line at 50% — coin-flip baseline */}
-            <ReferenceLine y={50} stroke="#374151" strokeDasharray="3 3" />
-            <Bar dataKey="winRate" radius={[4, 4, 0, 0]}>
+            {/* Zero line = no edge baseline */}
+            <ReferenceLine y={0} stroke="#6b7280" strokeWidth={1} />
+            <ReferenceLine y={10} stroke="#1f2937" strokeDasharray="3 3" />
+            <ReferenceLine y={-10} stroke="#1f2937" strokeDasharray="3 3" />
+            <ReferenceLine y={20} stroke="#1f2937" strokeDasharray="3 3" />
+            <ReferenceLine y={-20} stroke="#1f2937" strokeDasharray="3 3" />
+            <Bar dataKey="edge" radius={[4, 4, 0, 0]}>
               {buckets.map((b, i) => (
                 <Cell
                   key={i}
                   fill={
-                    b.winRate == null
+                    b.edge == null
                       ? "#1f2937"
-                      : b.winRate >= 50
+                      : b.edge >= 0
                       ? "#10b981"
                       : "#ef4444"
                   }
@@ -640,6 +720,21 @@ function WinRateByPriceChart({ orders }: { orders: Order[] }) {
           </BarChart>
         </ResponsiveContainer>
       )}
+
+      <div className="flex items-center gap-6 mt-3 justify-center">
+        <div className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded-sm bg-emerald-500 inline-block" />
+          <span className="text-xs text-gray-500">Beating implied odds</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded-sm bg-red-500 inline-block" />
+          <span className="text-xs text-gray-500">Below implied odds</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="w-px h-3 bg-gray-500 inline-block" />
+          <span className="text-xs text-gray-500">Zero edge</span>
+        </div>
+      </div>
     </div>
   );
 }
@@ -859,14 +954,54 @@ function PnLChart({ data }: { data: DailyPnl[] }) {
   );
 }
 
-// ── Orders Table ──────────────────────────────────────────────────────────────
+// ── Orders Table (paginated) ──────────────────────────────────────────────────
+
+const PAGE_SIZE = 25;
 
 function OrdersTable({ orders }: { orders: Order[] }) {
+  const [page, setPage] = useState(0);
+
+  const totalPages = Math.max(1, Math.ceil(orders.length / PAGE_SIZE));
+  const pageOrders = orders.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
+  // Reset to first page if the order list changes (e.g. after a refresh)
+  useEffect(() => {
+    setPage(0);
+  }, [orders.length]);
+
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-      <div className="px-5 py-4 border-b border-gray-800">
-        <h2 className="text-sm font-medium text-gray-400">All Orders</h2>
+      <div className="px-5 py-4 border-b border-gray-800 flex items-center justify-between">
+        <div>
+          <h2 className="text-sm font-medium text-gray-400">All Orders</h2>
+          <p className="text-xs text-gray-600 mt-0.5">
+            {orders.length.toLocaleString()} total · showing{" "}
+            {orders.length === 0 ? 0 : page * PAGE_SIZE + 1}–
+            {Math.min((page + 1) * PAGE_SIZE, orders.length)} of{" "}
+            {orders.length}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setPage((p) => Math.max(0, p - 1))}
+            disabled={page === 0}
+            className="text-xs border border-gray-700 rounded-lg px-3 py-1.5 text-gray-400 hover:text-gray-200 hover:border-gray-500 disabled:opacity-30 disabled:cursor-not-allowed transition"
+          >
+            ← Prev
+          </button>
+          <span className="text-xs text-gray-500 min-w-[80px] text-center">
+            Page {page + 1} of {totalPages}
+          </span>
+          <button
+            onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+            disabled={page >= totalPages - 1}
+            className="text-xs border border-gray-700 rounded-lg px-3 py-1.5 text-gray-400 hover:text-gray-200 hover:border-gray-500 disabled:opacity-30 disabled:cursor-not-allowed transition"
+          >
+            Next →
+          </button>
+        </div>
       </div>
+
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -891,14 +1026,14 @@ function OrdersTable({ orders }: { orders: Order[] }) {
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-800">
-            {orders.length === 0 && (
+            {pageOrders.length === 0 && (
               <tr>
                 <td colSpan={8} className="px-4 py-8 text-center text-gray-500">
                   No orders yet.
                 </td>
               </tr>
             )}
-            {orders.map((o) => {
+            {pageOrders.map((o) => {
               const netPnl =
                 o.pnl_dollars == null
                   ? null
@@ -965,6 +1100,33 @@ function OrdersTable({ orders }: { orders: Order[] }) {
           </tbody>
         </table>
       </div>
+
+      {totalPages > 1 && (
+        <div className="px-5 py-3 border-t border-gray-800 flex items-center justify-between">
+          <span className="text-xs text-gray-600">
+            {orders.length.toLocaleString()} total orders
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              disabled={page === 0}
+              className="text-xs border border-gray-700 rounded-lg px-3 py-1.5 text-gray-400 hover:text-gray-200 disabled:opacity-30 disabled:cursor-not-allowed transition"
+            >
+              ← Prev
+            </button>
+            <span className="text-xs text-gray-500">
+              {page + 1} / {totalPages}
+            </span>
+            <button
+              onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+              disabled={page >= totalPages - 1}
+              className="text-xs border border-gray-700 rounded-lg px-3 py-1.5 text-gray-400 hover:text-gray-200 disabled:opacity-30 disabled:cursor-not-allowed transition"
+            >
+              Next →
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

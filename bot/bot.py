@@ -188,6 +188,39 @@ def update_settlements(kalshi: KalshiClient, db: Database):
             log.warning(f"  Could not process {ticker}: {e}")
 
 
+def _debug_market_fields(markets: list[dict]):
+    """
+    ── DIAGNOSTIC: log the actual fields Kalshi returns on a market object.
+
+    This runs once per bot execution (on the first market in the batch) and
+    tells us:
+      1. Every field key the API returns — so we know the exact name for
+         "category", not a guess.
+      2. The actual value of market.get("category") — None, empty string,
+         or a real value.
+
+    HOW TO USE:
+      Run the bot once normally. In the PythonAnywhere log (or console output)
+      look for lines starting with "FIELD AUDIT". They will show you the
+      exact field names. Then come back and update the `category` line in
+      the insert_order call below if needed.
+
+    REMOVE THIS FUNCTION (and the call below) once categories are populating
+    correctly in Supabase.
+    """
+    if not markets:
+        return
+    sample = markets[0]
+    log.info("=" * 55)
+    log.info("FIELD AUDIT — first market object from Kalshi API:")
+    log.info(f"  All keys: {sorted(sample.keys())}")
+    log.info(f"  category value: {sample.get('category')!r}")
+    log.info(f"  category_id value: {sample.get('category_id')!r}")
+    log.info(f"  series_ticker value: {sample.get('series_ticker')!r}")
+    log.info(f"  event_ticker value: {sample.get('event_ticker')!r}")
+    log.info("=" * 55)
+
+
 def run():
     config = Config()
     kalshi = KalshiClient(config)
@@ -257,6 +290,11 @@ def run():
 
     log.info(f"Total markets returned: {len(markets)}")
 
+    # ── DIAGNOSTIC: log actual field names from Kalshi market objects ─────────
+    # Remove this call once you've confirmed the correct category field name.
+    _debug_market_fields(markets)
+    # ─────────────────────────────────────────────────────────────────────────
+
     already_ordered = db.get_todays_tickers()
     qualifying = []
     reject_counts: dict[str, int] = {}
@@ -273,8 +311,6 @@ def run():
     if reject_counts:
         log.info(f"Rejection breakdown: {reject_counts}")
 
-    # Track placement-loop outcomes too — useful for diagnosing why budget
-    # wasn't fully spent (e.g., "16 placed, 4 failed, 32 not reached")
     placement_outcomes = {
         "placed": 0,
         "failed": 0,
@@ -310,7 +346,6 @@ def run():
             placement_outcomes["stopped_at_budget"] = 1
             break
 
-        # We're attempting this market — decrement "not_reached"
         placement_outcomes["not_reached"] -= 1
 
         try:
@@ -329,7 +364,13 @@ def run():
                     "ticker": ticker,
                     "event_ticker": market.get("event_ticker", ""),
                     "market_title": market.get("title", ""),
+                    # ── category field ────────────────────────────────────────
+                    # Check FIELD AUDIT output in logs to confirm the right key.
+                    # If the audit shows "category" is always None/empty but
+                    # another field like "series_ticker" has the value you want,
+                    # update this line accordingly.
                     "category": market.get("category", ""),
+                    # ─────────────────────────────────────────────────────────
                     "yes_bid_dollars": float(market.get("yes_bid_dollars") or 0),
                     "yes_ask_dollars": float(market.get("yes_ask_dollars") or 0),
                     "midpoint_dollars": round(midpoint, 4),
@@ -355,7 +396,6 @@ def run():
             log.error(f"  ✗ Order failed for {ticker}: {e}")
             placement_outcomes["failed"] += 1
 
-    # Combine market-filter rejections + placement-loop outcomes into one dict
     full_breakdown = {**reject_counts, **placement_outcomes}
 
     db.update_run(
