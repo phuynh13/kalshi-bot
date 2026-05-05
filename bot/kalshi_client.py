@@ -92,17 +92,9 @@ class KalshiClient:
         """
         Fetch events for the same time window used to fetch markets.
 
-        Why this exists: Kalshi's market objects do not include a 'category'
-        field. The field audit confirmed this — 'category' is simply not in
-        the market endpoint response. Category lives on the parent event object.
-
-        This method is called once per run by build_category_lookup() in bot.py,
-        which returns a dict of event_ticker -> category for attaching to orders.
-
-        Each event dict includes at minimum:
-          - event_ticker (str)
-          - category (str): e.g. "Finance", "Economics", "Climate and Weather"
-          - title (str)
+        Why: Kalshi's market objects do not include a 'category' field.
+        Category is on the parent event object. This method is called once
+        per run to build a lookup of event_ticker → category.
         """
         path = "/trade-api/v2/events"
         events: list[dict] = []
@@ -136,7 +128,67 @@ class KalshiClient:
 
         return events
 
+    def get_settlements(self, limit: int = 500) -> list[dict]:
+        """
+        Fetch recent settled positions from the portfolio settlements endpoint.
+
+        This is the ground truth for whether an order was filled and paid out.
+        Use this instead of the /portfolio/orders/{id} endpoint for settlement
+        processing — Kalshi archives completed orders (returning 404) but
+        settlements remain accessible here indefinitely.
+
+        Kalshi field names (confirmed via API):
+          ticker                  — market ticker
+          market_result           — "yes" or "no"
+          yes_count_fp            — string, e.g. "1.00" (contracts held on YES side)
+          yes_total_cost_dollars  — string, e.g. "0.660000" (total cost paid, in dollars)
+          fee_cost                — string, e.g. "0.020000" (fees paid, in dollars)
+          revenue                 — integer, in CENTS (100 = $1.00 payout)
+          settled_time            — ISO timestamp
+
+        Note: revenue is in cents while cost fields are in dollars. Intentional
+        Kalshi inconsistency — divide revenue by 100 to get dollars.
+
+        Returns settlements newest-first. Paginates until `limit` is reached
+        or all records are exhausted.
+        """
+        path = "/trade-api/v2/portfolio/settlements"
+        settlements: list[dict] = []
+        cursor: str | None = None
+
+        while len(settlements) < limit:
+            params: dict = {"limit": min(200, limit - len(settlements))}
+            if cursor:
+                params["cursor"] = cursor
+
+            resp = self.http.get(
+                f"{self.config.base_url}{path}",
+                headers=self._auth_headers("GET", path),
+                params=params,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            batch = data.get("settlements", [])
+            settlements.extend(batch)
+            cursor = data.get("cursor")
+            log.debug(
+                f"Fetched {len(batch)} settlements "
+                f"(total so far: {len(settlements)})"
+            )
+            if not cursor or not batch:
+                break
+
+        return settlements
+
     def get_order(self, order_id: str) -> dict:
+        """
+        Fetch a single order by Kalshi order ID.
+
+        Note: Kalshi archives orders after settlement. Calling this on a
+        settled order returns 404. Use get_settlements() for ground-truth
+        settlement data instead. This method is still useful for checking
+        the status of resting/active orders (e.g. was it cancelled?).
+        """
         path = f"/trade-api/v2/portfolio/orders/{order_id}"
         resp = self.http.get(
             f"{self.config.base_url}{path}",
@@ -161,14 +213,12 @@ class KalshiClient:
         Fetch all current open positions on the account.
 
         Kalshi field names (confirmed via debug):
-          - position_fp (str): net contract count as decimal string e.g. "1.00"
-                               Positive = YES side. "0.00" = resting order, not filled.
-          - market_exposure_dollars (str): cost basis already in dollars e.g. "0.660000"
-          - realized_pnl_dollars (str): realized P&L in dollars
-          - fees_paid_dollars (str): fees in dollars
-          - resting_orders_count (int): number of unfilled resting orders on this market
-
-        Filter on parseFloat(position_fp) !== 0 to exclude resting-only positions.
+          position_fp              — string, net contract count e.g. "1.00"
+                                     "0.00" = resting order, not yet filled
+          market_exposure_dollars  — string, cost basis in dollars
+          realized_pnl_dollars     — string, in dollars
+          fees_paid_dollars        — string, in dollars
+          resting_orders_count     — integer
         """
         path = "/trade-api/v2/portfolio/positions"
         params = {"limit": 250, "settlement_status": "unsettled"}
