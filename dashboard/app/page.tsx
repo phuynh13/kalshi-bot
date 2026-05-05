@@ -1,16 +1,29 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import {
   AreaChart,
   Area,
+  BarChart,
+  Bar,
   XAxis,
   YAxis,
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
+  Cell,
+  ReferenceLine,
 } from "recharts";
-import { supabase, Order, DailyPnl, LifetimeStats, Run } from "../lib/supabase";
+import {
+  supabase,
+  Order,
+  DailyPnl,
+  LifetimeStats,
+  Run,
+  CategoryStats,
+  KalshiPosition,
+  KalshiBalance,
+} from "../lib/supabase";
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -40,6 +53,9 @@ const fmt = {
     const day = Math.floor(hr / 24);
     return `${day} day${day === 1 ? "" : "s"} ago`;
   },
+  // Convert Kalshi's integer cents to a display dollar string
+  centsToDollars: (cents: number | null | undefined) =>
+    cents == null ? "—" : `$${(cents / 100).toFixed(2)}`,
 };
 
 // ── Last Run Banner ──────────────────────────────────────────────────────────
@@ -113,9 +129,7 @@ function KillSwitch() {
         .select("value")
         .eq("key", "trading_enabled")
         .maybeSingle();
-
       if (cancelled) return;
-
       if (fetchError) {
         setError(fetchError.message);
         return;
@@ -132,7 +146,6 @@ function KillSwitch() {
     const next = !enabled;
     const action = next ? "enable" : "disable";
     if (!confirm(`Are you sure you want to ${action} trading?`)) return;
-
     setBusy(true);
     setError(null);
     try {
@@ -190,9 +203,164 @@ function KillSwitch() {
   );
 }
 
+// ── Open Positions Panel ─────────────────────────────────────────────────────
+// Live exposure + balance pulled from Kalshi via /api/positions.
+// Shown collapsed by default; expand to see per-position breakdown.
+
+function OpenPositionsPanel() {
+  const [positions, setPositions] = useState<KalshiPosition[] | null>(null);
+  const [balance, setBalance] = useState<KalshiBalance | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
+
+  async function load() {
+    setLoading(true);
+    setError(null);
+    try {
+      const resp = await fetch("/api/positions");
+      const json = await resp.json();
+      if (!resp.ok || !json.ok) {
+        throw new Error(json.error || `HTTP ${resp.status}`);
+      }
+      // Filter out positions with 0 contracts (these are settled-but-not-yet-removed)
+      const activePositions = (json.positions as KalshiPosition[]).filter(
+        (p) => p.position !== 0
+      );
+      setPositions(activePositions);
+      setBalance(json.balance);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  // Aggregate exposure across all open positions
+  const totalExposureCents = positions
+    ? positions.reduce((sum, p) => sum + (p.market_exposure ?? 0), 0)
+    : 0;
+  const totalContracts = positions
+    ? positions.reduce((sum, p) => sum + Math.abs(p.position ?? 0), 0)
+    : 0;
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl mb-6 overflow-hidden">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full px-5 py-4 flex items-center justify-between hover:bg-gray-800/40 transition"
+      >
+        <div className="flex items-center gap-3 flex-wrap">
+          <h2 className="text-sm font-medium text-gray-400">Live positions</h2>
+          {loading ? (
+            <span className="text-xs text-gray-500">loading…</span>
+          ) : error ? (
+            <span className="text-xs text-red-400">error: {error}</span>
+          ) : positions === null ? null : (
+            <div className="flex items-center gap-3 text-sm font-mono">
+              <span className="text-gray-300">{positions.length}</span>
+              <span className="text-xs text-gray-500">positions ·</span>
+              <span className="text-gray-300">{totalContracts}</span>
+              <span className="text-xs text-gray-500">contracts ·</span>
+              <span className="text-gray-300">
+                {fmt.centsToDollars(totalExposureCents)}
+              </span>
+              <span className="text-xs text-gray-500">at risk</span>
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          {balance && (
+            <span className="text-xs text-gray-500 hidden sm:inline">
+              balance:{" "}
+              <span className="text-gray-300 font-mono">
+                {fmt.centsToDollars(balance.balance)}
+              </span>
+            </span>
+          )}
+          <span className="text-xs text-gray-500">
+            {expanded ? "▲ collapse" : "▼ details"}
+          </span>
+        </div>
+      </button>
+
+      {expanded && (
+        <div className="px-5 pb-5 border-t border-gray-800 pt-4">
+          {error ? (
+            <p className="text-xs text-red-400">
+              Could not fetch positions: {error}
+            </p>
+          ) : positions === null || positions.length === 0 ? (
+            <p className="text-xs text-gray-500">No open positions.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-800">
+                    {["Ticker", "Side", "Contracts", "Cost basis", "Realized", "Fees"].map((h) => (
+                      <th
+                        key={h}
+                        className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-800">
+                  {positions.map((p) => (
+                    <tr key={p.ticker} className="hover:bg-gray-800/40 transition">
+                      <td className="px-3 py-2 font-mono text-xs text-indigo-400">
+                        {p.ticker}
+                      </td>
+                      <td className="px-3 py-2 text-xs">
+                        <span
+                          className={
+                            p.position > 0
+                              ? "text-emerald-400"
+                              : "text-red-400"
+                          }
+                        >
+                          {p.position > 0 ? "YES" : "NO"}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 font-mono text-gray-300">
+                        {Math.abs(p.position)}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-gray-300">
+                        {fmt.centsToDollars(p.market_exposure)}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-gray-500 text-xs">
+                        {fmt.centsToDollars(p.realized_pnl)}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-gray-500 text-xs">
+                        {fmt.centsToDollars(p.fees_paid)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="mt-3 flex justify-end">
+                <button
+                  onClick={load}
+                  className="text-xs text-gray-500 hover:text-gray-300 border border-gray-700 rounded-lg px-3 py-1 transition"
+                >
+                  Refresh
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Run Funnel Breakdown ─────────────────────────────────────────────────────
-// Shows the full pipeline: markets evaluated → qualified → placed.
-// Click to expand for rejection reasons + placement-loop outcomes.
 
 function RunFunnel({
   run,
@@ -202,14 +370,12 @@ function RunFunnel({
   ordersForRun: Order[];
 }) {
   const [expanded, setExpanded] = useState(false);
-
   if (!run) return null;
 
   const evaluated = run.markets_evaluated ?? 0;
   const qualified = run.orders_attempted ?? 0;
   const placed = run.orders_placed ?? 0;
 
-  // Compute spread + midpoint stats from the actual placed orders for this run
   const spreads: number[] = [];
   const midpoints: number[] = [];
   for (const o of ordersForRun) {
@@ -220,33 +386,17 @@ function RunFunnel({
   }
   const avg = (arr: number[]) =>
     arr.length === 0 ? null : arr.reduce((a, b) => a + b, 0) / arr.length;
-  const min = (arr: number[]) =>
-    arr.length === 0 ? null : Math.min(...arr);
-  const max = (arr: number[]) =>
-    arr.length === 0 ? null : Math.max(...arr);
+  const minOf = (arr: number[]) => (arr.length === 0 ? null : Math.min(...arr));
+  const maxOf = (arr: number[]) => (arr.length === 0 ? null : Math.max(...arr));
 
-  const avgSpread = avg(spreads);
-  const minSpread = min(spreads);
-  const maxSpread = max(spreads);
-  const avgMidpoint = avg(midpoints);
-  const minMidpoint = min(midpoints);
-  const maxMidpoint = max(midpoints);
-
-  // Sort rejection_breakdown into filter-rejections vs placement-outcomes for display
   const breakdown = run.rejection_breakdown ?? {};
-  const placementKeys = new Set([
-    "placed",
-    "failed",
-    "stopped_at_budget",
-    "not_reached",
-  ]);
+  const placementKeys = new Set(["placed", "failed", "stopped_at_budget", "not_reached"]);
   const filterReasons: [string, number | string][] = [];
   const placementOutcomes: [string, number | string][] = [];
   for (const [k, v] of Object.entries(breakdown)) {
     if (placementKeys.has(k)) placementOutcomes.push([k, v]);
     else filterReasons.push([k, v]);
   }
-  // Sort filter reasons by count descending
   filterReasons.sort((a, b) => Number(b[1]) - Number(a[1]));
 
   return (
@@ -256,21 +406,15 @@ function RunFunnel({
         className="w-full px-5 py-4 flex items-center justify-between hover:bg-gray-800/40 transition"
       >
         <div className="flex items-center gap-3 flex-wrap">
-          <h2 className="text-sm font-medium text-gray-400">
-            Last run pipeline
-          </h2>
+          <h2 className="text-sm font-medium text-gray-400">Last run pipeline</h2>
           <div className="flex items-center gap-2 text-sm font-mono">
-            <span className="text-gray-300">
-              {evaluated.toLocaleString()}
-            </span>
+            <span className="text-gray-300">{evaluated.toLocaleString()}</span>
             <span className="text-gray-600">→</span>
             <span className="text-indigo-400">{qualified.toLocaleString()}</span>
             <span className="text-gray-600">→</span>
             <span className="text-emerald-400">{placed.toLocaleString()}</span>
           </div>
-          <div className="text-xs text-gray-500">
-            evaluated → qualified → placed
-          </div>
+          <div className="text-xs text-gray-500">evaluated → qualified → placed</div>
         </div>
         <span className="text-xs text-gray-500">
           {expanded ? "▲ collapse" : "▼ details"}
@@ -279,7 +423,6 @@ function RunFunnel({
 
       {expanded && (
         <div className="px-5 pb-5 border-t border-gray-800 grid grid-cols-1 md:grid-cols-3 gap-5 pt-4">
-          {/* Filter rejections */}
           <div>
             <h3 className="text-xs text-gray-500 uppercase tracking-wider mb-2">
               Why markets were filtered out
@@ -301,8 +444,6 @@ function RunFunnel({
               </ul>
             )}
           </div>
-
-          {/* Placement outcomes */}
           <div>
             <h3 className="text-xs text-gray-500 uppercase tracking-wider mb-2">
               Placement loop
@@ -316,16 +457,12 @@ function RunFunnel({
                     <span className="text-gray-400 text-xs">
                       {key.replace(/_/g, " ")}
                     </span>
-                    <span className="font-mono text-gray-300">
-                      {String(val)}
-                    </span>
+                    <span className="font-mono text-gray-300">{String(val)}</span>
                   </li>
                 ))}
               </ul>
             )}
           </div>
-
-          {/* Stats from actual placed orders */}
           <div>
             <h3 className="text-xs text-gray-500 uppercase tracking-wider mb-2">
               Placed-order stats
@@ -337,25 +474,25 @@ function RunFunnel({
                 <li className="flex items-center justify-between">
                   <span className="text-gray-400 text-xs">midpoint range</span>
                   <span className="font-mono text-gray-300 text-xs">
-                    ${minMidpoint?.toFixed(3)} – ${maxMidpoint?.toFixed(3)}
+                    ${minOf(midpoints)?.toFixed(3)} – ${maxOf(midpoints)?.toFixed(3)}
                   </span>
                 </li>
                 <li className="flex items-center justify-between">
                   <span className="text-gray-400 text-xs">avg midpoint</span>
                   <span className="font-mono text-gray-300 text-xs">
-                    ${avgMidpoint?.toFixed(4)}
+                    ${avg(midpoints)?.toFixed(4)}
                   </span>
                 </li>
                 <li className="flex items-center justify-between">
                   <span className="text-gray-400 text-xs">spread range</span>
                   <span className="font-mono text-gray-300 text-xs">
-                    ${minSpread?.toFixed(3)} – ${maxSpread?.toFixed(3)}
+                    ${minOf(spreads)?.toFixed(3)} – ${maxOf(spreads)?.toFixed(3)}
                   </span>
                 </li>
                 <li className="flex items-center justify-between">
                   <span className="text-gray-400 text-xs">avg spread</span>
                   <span className="font-mono text-gray-300 text-xs">
-                    ${avgSpread?.toFixed(4)}
+                    ${avg(spreads)?.toFixed(4)}
                   </span>
                 </li>
               </ul>
@@ -363,6 +500,229 @@ function RunFunnel({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Win Rate by Entry Price Bucket ───────────────────────────────────────────
+// Bar chart: 5¢ buckets, win rate on Y axis, sample size as bar opacity.
+// Categories with <10 settled samples are de-emphasized as statistically noisy.
+
+const MIN_RELIABLE_SAMPLE = 10;
+const BUCKET_WIDTH = 0.05; // 5¢ buckets
+const BUCKET_START = 0.55; // 55¢ — covers your 58–85% range with a buffer
+const BUCKET_END = 0.90;
+
+function WinRateByPriceChart({ orders }: { orders: Order[] }) {
+  const buckets = useMemo(() => {
+    // Create bucket bins
+    type Bucket = {
+      range: string;          // "$0.60–$0.65"
+      lower: number;
+      wins: number;
+      losses: number;
+      total: number;
+      winRate: number | null;
+      reliable: boolean;
+    };
+    const bins: Bucket[] = [];
+    for (let lower = BUCKET_START; lower < BUCKET_END; lower += BUCKET_WIDTH) {
+      const upper = lower + BUCKET_WIDTH;
+      bins.push({
+        range: `$${lower.toFixed(2)}-$${upper.toFixed(2)}`,
+        lower: parseFloat(lower.toFixed(2)),
+        wins: 0,
+        losses: 0,
+        total: 0,
+        winRate: null,
+        reliable: false,
+      });
+    }
+
+    // Count each settled order into its bucket using actual fill cost per contract
+    for (const o of orders) {
+      if (o.settlement_result !== "yes" && o.settlement_result !== "no") continue;
+      // Use per-contract fill price; fall back to limit price if fill data missing
+      const price =
+        o.fill_cost_dollars != null && o.filled_count
+          ? o.fill_cost_dollars / o.filled_count
+          : o.order_price_dollars;
+      if (!price) continue;
+
+      const idx = Math.floor((price - BUCKET_START) / BUCKET_WIDTH);
+      if (idx < 0 || idx >= bins.length) continue;
+      const bucket = bins[idx];
+      if (o.settlement_result === "yes") bucket.wins++;
+      else bucket.losses++;
+      bucket.total++;
+    }
+
+    // Compute win rate + reliability flag
+    for (const b of bins) {
+      if (b.total > 0) {
+        b.winRate = (100 * b.wins) / b.total;
+        b.reliable = b.total >= MIN_RELIABLE_SAMPLE;
+      }
+    }
+    return bins;
+  }, [orders]);
+
+  const hasData = buckets.some((b) => b.total > 0);
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 mb-6">
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="text-sm font-medium text-gray-400">
+          Win rate by entry price
+        </h2>
+        <span className="text-xs text-gray-600">
+          fade = small sample (&lt;{MIN_RELIABLE_SAMPLE})
+        </span>
+      </div>
+      <p className="text-xs text-gray-600 mb-4">
+        Settled orders bucketed by actual fill price. Dashed line = breakeven at price (1−p).
+      </p>
+
+      {!hasData ? (
+        <p className="text-sm text-gray-500 py-8 text-center">
+          No settled orders yet.
+        </p>
+      ) : (
+        <ResponsiveContainer width="100%" height={240}>
+          <BarChart data={buckets}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+            <XAxis
+              dataKey="range"
+              tick={{ fill: "#6b7280", fontSize: 10 }}
+              tickLine={false}
+              axisLine={false}
+              interval={0}
+            />
+            <YAxis
+              domain={[0, 100]}
+              tick={{ fill: "#6b7280", fontSize: 11 }}
+              tickLine={false}
+              axisLine={false}
+              tickFormatter={(v) => `${v}%`}
+            />
+            <Tooltip
+              contentStyle={{
+                backgroundColor: "#111827",
+                border: "1px solid #374151",
+                borderRadius: "8px",
+                fontSize: "12px",
+              }}
+              formatter={(_v: number, _n: string, p: { payload: { wins: number; losses: number; total: number; winRate: number | null } }) => {
+                const d = p.payload;
+                return [
+                  `${d.winRate?.toFixed(1) ?? "—"}% (${d.wins}W / ${d.losses}L, n=${d.total})`,
+                  "Win rate",
+                ];
+              }}
+            />
+            {/* Reference line at 50% — coin-flip baseline */}
+            <ReferenceLine y={50} stroke="#374151" strokeDasharray="3 3" />
+            <Bar dataKey="winRate" radius={[4, 4, 0, 0]}>
+              {buckets.map((b, i) => (
+                <Cell
+                  key={i}
+                  fill={
+                    b.winRate == null
+                      ? "#1f2937"
+                      : b.winRate >= 50
+                      ? "#10b981"
+                      : "#ef4444"
+                  }
+                  fillOpacity={b.reliable ? 1 : 0.35}
+                />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      )}
+    </div>
+  );
+}
+
+// ── Category Breakdown ───────────────────────────────────────────────────────
+
+function CategoryBreakdown({ stats }: { stats: CategoryStats[] }) {
+  if (stats.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl mb-6 overflow-hidden">
+      <div className="px-5 py-4 border-b border-gray-800">
+        <h2 className="text-sm font-medium text-gray-400">
+          Performance by category
+        </h2>
+        <p className="text-xs text-gray-600 mt-0.5">
+          Categories with &lt;{MIN_RELIABLE_SAMPLE} settled orders are dimmed (small sample noise)
+        </p>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-gray-800">
+              {["Category", "Settled", "Wins", "Losses", "Win Rate", "Spent", "Fees", "Net P&L"].map((h) => (
+                <th
+                  key={h}
+                  className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"
+                >
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-800">
+            {stats.map((s) => {
+              const reliable = s.settled_orders >= MIN_RELIABLE_SAMPLE;
+              const pnlColor =
+                s.net_pnl == null
+                  ? "text-gray-400"
+                  : s.net_pnl >= 0
+                  ? "text-emerald-400"
+                  : "text-red-400";
+              const winRateColor =
+                s.win_rate_pct == null
+                  ? "text-gray-400"
+                  : s.win_rate_pct >= 58
+                  ? "text-emerald-400"
+                  : "text-red-400";
+              const opacity = reliable ? "opacity-100" : "opacity-40";
+              return (
+                <tr key={s.category} className={`hover:bg-gray-800/40 transition ${opacity}`}>
+                  <td className="px-4 py-3 text-gray-300 whitespace-nowrap">
+                    {s.category}
+                  </td>
+                  <td className="px-4 py-3 font-mono text-gray-300">
+                    {s.settled_orders}
+                  </td>
+                  <td className="px-4 py-3 font-mono text-emerald-400 text-xs">
+                    {s.wins}
+                  </td>
+                  <td className="px-4 py-3 font-mono text-red-400 text-xs">
+                    {s.losses}
+                  </td>
+                  <td className={`px-4 py-3 font-mono ${winRateColor}`}>
+                    {fmt.pct(s.win_rate_pct)}
+                  </td>
+                  <td className="px-4 py-3 font-mono text-gray-400 text-xs">
+                    ${s.total_spent?.toFixed(2) ?? "0.00"}
+                  </td>
+                  <td className="px-4 py-3 font-mono text-gray-500 text-xs">
+                    ${s.total_fees?.toFixed(4) ?? "0.0000"}
+                  </td>
+                  <td className={`px-4 py-3 font-mono font-medium ${pnlColor}`}>
+                    {fmt.dollars(s.net_pnl)}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -616,12 +976,13 @@ export default function DashboardPage() {
   const [dailyPnl, setDailyPnl] = useState<DailyPnl[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [lastRun, setLastRun] = useState<Run | null>(null);
+  const [categoryStats, setCategoryStats] = useState<CategoryStats[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<string>("");
 
   async function load() {
     setLoading(true);
-    const [statsRes, dailyRes, ordersRes, runsRes] = await Promise.all([
+    const [statsRes, dailyRes, ordersRes, runsRes, catRes] = await Promise.all([
       supabase.from("lifetime_stats").select("*").single(),
       supabase
         .from("daily_pnl")
@@ -632,17 +993,19 @@ export default function DashboardPage() {
         .from("orders")
         .select("*")
         .order("created_at", { ascending: false })
-        .limit(200),
+        .limit(500),
       supabase
         .from("runs")
         .select("*")
         .order("run_at", { ascending: false })
         .limit(1),
+      supabase.from("category_stats").select("*"),
     ]);
     if (statsRes.data) setStats(statsRes.data);
     if (dailyRes.data) setDailyPnl(dailyRes.data);
     if (ordersRes.data) setOrders(ordersRes.data);
     if (runsRes.data && runsRes.data.length > 0) setLastRun(runsRes.data[0]);
+    if (catRes.data) setCategoryStats(catRes.data);
     setLastUpdated(new Date().toLocaleTimeString());
     setLoading(false);
   }
@@ -651,7 +1014,6 @@ export default function DashboardPage() {
     load();
   }, []);
 
-  // Filter to only orders belonging to the current/most-recent run
   const ordersForLastRun = lastRun
     ? orders.filter((o) => o.run_id === lastRun.id)
     : [];
@@ -692,6 +1054,7 @@ export default function DashboardPage() {
 
       <LastRunBanner run={lastRun} />
       <KillSwitch />
+      <OpenPositionsPanel />
       <RunFunnel run={lastRun} ordersForRun={ordersForLastRun} />
 
       {/* Stats Cards */}
@@ -743,6 +1106,10 @@ export default function DashboardPage() {
           <PnLChart data={dailyPnl} />
         </div>
       )}
+
+      <WinRateByPriceChart orders={orders} />
+
+      <CategoryBreakdown stats={categoryStats} />
 
       <OrdersTable orders={orders} />
 

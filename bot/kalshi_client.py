@@ -51,10 +51,6 @@ class KalshiClient:
         status: str = "open",
         page_size: int = 1000,
     ) -> list[dict]:
-        """
-        Fetch all markets with close_time <= max_close_ts.
-        Paginates automatically using the cursor field.
-        """
         path = "/trade-api/v2/markets"
         markets: list[dict] = []
         cursor: str | None = None
@@ -87,11 +83,6 @@ class KalshiClient:
         return markets
 
     def get_order(self, order_id: str) -> dict:
-        """
-        Fetch a single order by its Kalshi order ID.
-        Used to check whether an order was filled, resting, or cancelled.
-        Possible status values: 'resting' | 'filled' | 'cancelled' | 'partially_filled'
-        """
         path = f"/trade-api/v2/portfolio/orders/{order_id}"
         resp = self.http.get(
             f"{self.config.base_url}{path}",
@@ -101,7 +92,6 @@ class KalshiClient:
         return resp.json().get("order", {})
 
     def get_market(self, ticker: str) -> dict:
-        """Fetch a single market by ticker. Used for settlement checks."""
         path = f"/trade-api/v2/markets/{ticker}"
         resp = self.http.get(
             f"{self.config.base_url}{path}",
@@ -110,22 +100,59 @@ class KalshiClient:
         resp.raise_for_status()
         return resp.json().get("market", {})
 
+    # ── Portfolio data ────────────────────────────────────────────────────────
+
+    def get_positions(self) -> list[dict]:
+        """
+        Fetch all current open positions on the account.
+
+        Each position represents holdings in a single market. Includes:
+          - ticker, market_exposure (cost basis in cents), position (count of contracts)
+          - realized_pnl, fees_paid (cents)
+          - last_updated_ts
+
+        Position counts are positive for YES side, negative for NO side.
+        Since this bot only buys YES, all positions should be positive.
+
+        Note: this returns positions whose markets haven't yet settled. Once
+        a market resolves, its position drops off this list and shows up on
+        /portfolio/settlements instead.
+        """
+        path = "/trade-api/v2/portfolio/positions"
+        # Get up to 250 positions (Kalshi's default limit). For our $30/day bot
+        # we'll never have more than ~50 open at once, so no pagination needed.
+        params = {"limit": 250, "settlement_status": "unsettled"}
+        resp = self.http.get(
+            f"{self.config.base_url}{path}",
+            headers=self._auth_headers("GET", path),
+            params=params,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        # Response has both market_positions (per-market) and event_positions.
+        # We want market_positions for individual ticker-level exposure.
+        return data.get("market_positions", [])
+
+    def get_balance(self) -> dict:
+        """
+        Fetch account balance and portfolio value.
+
+        Returns:
+            { "balance": <cents>, "portfolio_value": <cents>, "updated_ts": <unix> }
+        """
+        path = "/trade-api/v2/portfolio/balance"
+        resp = self.http.get(
+            f"{self.config.base_url}{path}",
+            headers=self._auth_headers("GET", path),
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     # ── Order placement ───────────────────────────────────────────────────────
 
     def place_limit_order(
         self, ticker: str, yes_price_cents: int, count: int = 1
     ) -> dict:
-        """
-        Place a YES-side limit buy order.
-
-        Args:
-            ticker:          Market ticker (e.g. "KXFED-26MAR19")
-            yes_price_cents: Limit price in integer cents (1–99)
-            count:           Number of contracts (default 1)
-
-        Returns:
-            The order object returned by the API.
-        """
         path = "/trade-api/v2/portfolio/orders"
         body = {
             "ticker": ticker,

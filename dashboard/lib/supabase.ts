@@ -72,3 +72,40 @@ export type LifetimeStats = {
   win_rate_pct: number | null;
   avg_entry_price: number | null;
 };
+
+export type CategoryStats = {
+  category: string;
+  settled_orders: number;
+  cancelled_orders: number;
+  pending_orders: number;
+  wins: number;
+  losses: number;
+  total_spent: number;
+  total_fees: number;
+  net_pnl: number;
+  win_rate_pct: number | null;
+  avg_entry_price: number | null;
+};
+
+// ── Live data (not from Supabase — comes from /api/positions) ──────────────────
+
+// Kalshi returns money values in cents. Position count is positive for YES, negative for NO.
+export type KalshiPosition = {
+  ticker: string;
+  position: number;            // contract count (+ for YES, - for NO)
+  market_exposure: number;     // cost basis in cents
+  realized_pnl: number;        // realized P&L on this market (cents)
+  fees_paid: number;           // fees paid on this market (cents)
+  resting_orders_count?: number;
+  last_updated_ts?: string;
+};
+
+export type KalshiBalance = {
+  balance: number;             // available cash in cents
+  portfolio_value: number;     // value of open positions in cents
+  updated_ts?: number;
+};
+
+export type PositionsResponse =
+  | { ok: true; positions: KalshiPosition[]; balance: KalshiBalance }
+  | { ok: false; error: string };
