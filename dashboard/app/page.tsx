@@ -64,6 +64,22 @@ const fmt = {
   },
 };
 
+// ── Ticker Link ───────────────────────────────────────────────────────────────
+// Reusable component — renders a ticker as a clickable link to /market/[ticker].
+// Used in both the orders table and open positions panel.
+
+function TickerLink({ ticker, className = "" }: { ticker: string; className?: string }) {
+  return (
+    <a
+      href={`/market/${ticker}`}
+      className={`font-mono text-xs text-indigo-400 hover:text-indigo-300 underline underline-offset-2 transition truncate ${className}`}
+      title={ticker}
+    >
+      {ticker}
+    </a>
+  );
+}
+
 // ── Last Run Banner ──────────────────────────────────────────────────────────
 
 const STALE_HOURS = 26;
@@ -326,7 +342,10 @@ function OpenPositionsPanel() {
                     const count = getCount(p);
                     return (
                       <tr key={p.ticker} className="hover:bg-gray-800/40 transition">
-                        <td className="px-3 py-2 font-mono text-xs text-indigo-400">{p.ticker}</td>
+                        {/* ── Ticker — clickable link to market detail ── */}
+                        <td className="px-3 py-2">
+                          <TickerLink ticker={p.ticker} />
+                        </td>
                         <td className="px-3 py-2 text-xs">
                           <span className={count > 0 ? "text-emerald-400" : "text-red-400"}>
                             {count > 0 ? "YES" : "NO"}
@@ -468,21 +487,12 @@ function RunFunnel({ run, ordersForRun }: { run: Run | null; ordersForRun: Order
 }
 
 // ── Edge over Implied Odds Chart ──────────────────────────────────────────────
-//
-// Each bar shows: actual_win_rate - implied_probability_at_entry_price
-// The label on each bar shows the edge% and sample size (n).
-//
-// Mental model: buying YES at $0.70 means the market already prices that at
-// 70% implied probability. Winning exactly 70% = zero edge. This chart shows
-// how much better (or worse) you're actually doing than the market expected.
 
 const MIN_RELIABLE_SAMPLE = 10;
 const BUCKET_WIDTH = 0.05;
 const BUCKET_START = 0.55;
 const BUCKET_END = 0.90;
 
-// Custom bar label — renders above positive bars, below negative bars.
-// Shows edge% on the first line, sample size on the second line.
 function EdgeBarLabel(props: any) {
   const { x, y, width, height, value, payload } = props;
   if (value == null || payload?.total === 0) return null;
@@ -490,33 +500,16 @@ function EdgeBarLabel(props: any) {
   const n = payload?.total ?? 0;
   const isPositive = value >= 0;
   const barCenterX = x + width / 2;
-
-  // For positive bars: label sits above. For negative: label sits below.
   const labelY = isPositive ? y - 6 : y + height + 16;
   const edgeStr = `${value >= 0 ? "+" : ""}${value.toFixed(1)}%`;
   const dimmed = n < MIN_RELIABLE_SAMPLE;
 
   return (
     <g opacity={dimmed ? 0.45 : 1}>
-      <text
-        x={barCenterX}
-        y={labelY}
-        textAnchor="middle"
-        fill={isPositive ? "#10b981" : "#ef4444"}
-        fontSize={10}
-        fontWeight={600}
-        fontFamily="monospace"
-      >
+      <text x={barCenterX} y={labelY} textAnchor="middle" fill={isPositive ? "#10b981" : "#ef4444"} fontSize={10} fontWeight={600} fontFamily="monospace">
         {edgeStr}
       </text>
-      <text
-        x={barCenterX}
-        y={labelY + 13}
-        textAnchor="middle"
-        fill="#6b7280"
-        fontSize={9}
-        fontFamily="monospace"
-      >
+      <text x={barCenterX} y={labelY + 13} textAnchor="middle" fill="#6b7280" fontSize={9} fontFamily="monospace">
         n={n}
       </text>
     </g>
@@ -583,14 +576,11 @@ function WinRateByPriceChart({ orders }: { orders: Order[] }) {
   }, [orders]);
 
   const hasData = buckets.some((b) => b.total > 0);
-
   const edges = buckets.filter((b) => b.edge !== null).map((b) => b.edge as number);
   const maxAbs = edges.length > 0 ? Math.max(30, ...edges.map(Math.abs)) : 30;
-  // Add 12% headroom above bars so the labels don't get clipped
   const yMax = Math.ceil((maxAbs + 12) / 5) * 5;
   const yDomain: [number, number] = [-yMax, yMax];
 
-  // Totals row for the summary below the chart
   const totalSettled = buckets.reduce((s, b) => s + b.total, 0);
   const totalWins = buckets.reduce((s, b) => s + b.wins, 0);
   const overallWinRate = totalSettled > 0 ? (100 * totalWins) / totalSettled : null;
@@ -613,48 +603,15 @@ function WinRateByPriceChart({ orders }: { orders: Order[] }) {
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={buckets} margin={{ top: 32, right: 8, left: 0, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-              <XAxis
-                dataKey="range"
-                tick={{ fill: "#6b7280", fontSize: 10 }}
-                tickLine={false}
-                axisLine={false}
-                interval={0}
-              />
-              <YAxis
-                domain={yDomain}
-                tick={{ fill: "#6b7280", fontSize: 11 }}
-                tickLine={false}
-                axisLine={false}
-                tickFormatter={(v) => `${v > 0 ? "+" : ""}${v}%`}
-              />
+              <XAxis dataKey="range" tick={{ fill: "#6b7280", fontSize: 10 }} tickLine={false} axisLine={false} interval={0} />
+              <YAxis domain={yDomain} tick={{ fill: "#6b7280", fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={(v) => `${v > 0 ? "+" : ""}${v}%`} />
               <Tooltip
-                contentStyle={{
-                  backgroundColor: "#111827",
-                  border: "1px solid #374151",
-                  borderRadius: "8px",
-                  fontSize: "12px",
-                }}
-                formatter={(
-                  _v: number,
-                  _n: string,
-                  p: {
-                    payload: {
-                      wins: number;
-                      losses: number;
-                      total: number;
-                      winRate: number | null;
-                      impliedPct: number;
-                      edge: number | null;
-                    };
-                  }
-                ) => {
+                contentStyle={{ backgroundColor: "#111827", border: "1px solid #374151", borderRadius: "8px", fontSize: "12px" }}
+                formatter={(_v: number, _n: string, p: { payload: { wins: number; losses: number; total: number; winRate: number | null; impliedPct: number; edge: number | null } }) => {
                   const d = p.payload;
                   if (d.total === 0) return ["No data", ""];
                   const edgeStr = d.edge != null ? `${d.edge >= 0 ? "+" : ""}${d.edge.toFixed(1)}%` : "—";
-                  return [
-                    `Edge: ${edgeStr}\nActual: ${d.winRate?.toFixed(1) ?? "—"}%  Implied: ${d.impliedPct}%\n${d.wins}W / ${d.losses}L  (n=${d.total})`,
-                    "",
-                  ];
+                  return [`Edge: ${edgeStr}\nActual: ${d.winRate?.toFixed(1) ?? "—"}%  Implied: ${d.impliedPct}%\n${d.wins}W / ${d.losses}L  (n=${d.total})`, ""];
                 }}
               />
               <ReferenceLine y={0} stroke="#6b7280" strokeWidth={1} />
@@ -664,17 +621,12 @@ function WinRateByPriceChart({ orders }: { orders: Order[] }) {
               <ReferenceLine y={-20} stroke="#1f2937" strokeDasharray="3 3" />
               <Bar dataKey="edge" radius={[3, 3, 0, 0]} label={<EdgeBarLabel />}>
                 {buckets.map((b, i) => (
-                  <Cell
-                    key={i}
-                    fill={b.edge == null ? "#1f2937" : b.edge >= 0 ? "#10b981" : "#ef4444"}
-                    fillOpacity={b.reliable ? 1 : 0.35}
-                  />
+                  <Cell key={i} fill={b.edge == null ? "#1f2937" : b.edge >= 0 ? "#10b981" : "#ef4444"} fillOpacity={b.reliable ? 1 : 0.35} />
                 ))}
               </Bar>
             </BarChart>
           </ResponsiveContainer>
 
-          {/* Summary row under the chart */}
           <div className="mt-4 pt-3 border-t border-gray-800 flex items-center justify-between flex-wrap gap-3">
             <div className="flex items-center gap-6">
               <div className="flex items-center gap-1.5">
@@ -689,11 +641,8 @@ function WinRateByPriceChart({ orders }: { orders: Order[] }) {
             {overallWinRate !== null && (
               <div className="text-xs text-gray-500 font-mono">
                 Overall:{" "}
-                <span className="text-gray-300">
-                  {overallWinRate.toFixed(1)}% actual win rate
-                </span>{" "}
-                across{" "}
-                <span className="text-gray-300">{totalSettled}</span> settled orders
+                <span className="text-gray-300">{overallWinRate.toFixed(1)}% actual win rate</span>{" "}
+                across <span className="text-gray-300">{totalSettled}</span> settled orders
               </div>
             )}
           </div>
@@ -721,9 +670,7 @@ function CategoryBreakdown({ stats }: { stats: CategoryStats[] }) {
           <thead>
             <tr className="border-b border-gray-800">
               {["Category", "Settled", "Wins", "Losses", "Win Rate", "Spent", "Fees", "Net P&L"].map((h) => (
-                <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  {h}
-                </th>
+                <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{h}</th>
               ))}
             </tr>
           </thead>
@@ -813,15 +760,6 @@ function PnLChart({ data }: { data: DailyPnl[] }) {
 }
 
 // ── Orders Table (paginated) ──────────────────────────────────────────────────
-//
-// "Filled @" column logic — three distinct states:
-//   1. fill_cost_dollars is set AND filled_count > 0
-//      → show actual per-contract fill price in white (confirmed real fill data)
-//   2. fill_cost_dollars is NULL, order settled YES or NO
-//      → show limit price in amber with "~" prefix (estimated — Kalshi didn't
-//        return fill data, so we used the limit price as fallback in P&L calc)
-//   3. fill_cost_dollars is NULL, order still pending or cancelled
-//      → show "—" (not yet filled)
 
 const PAGE_SIZE = 25;
 
@@ -833,7 +771,6 @@ function OrdersTable({ orders }: { orders: Order[] }) {
 
   useEffect(() => { setPage(0); }, [orders.length]);
 
-  // How many settled orders are missing fill data — shown in the header
   const missingFillCount = orders.filter(
     (o) =>
       (o.settlement_result === "yes" || o.settlement_result === "no") &&
@@ -882,9 +819,7 @@ function OrdersTable({ orders }: { orders: Order[] }) {
           <thead>
             <tr className="border-b border-gray-800">
               {["Date", "Market", "Category", "Limit", "Filled @", "Result", "Fees", "Net P&L"].map((h) => (
-                <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  {h}
-                </th>
+                <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{h}</th>
               ))}
             </tr>
           </thead>
@@ -899,17 +834,11 @@ function OrdersTable({ orders }: { orders: Order[] }) {
               const pnlColor = netPnl == null ? "text-gray-400" : netPnl >= 0 ? "text-emerald-400" : "text-red-400";
               const isSettled = o.settlement_result === "yes" || o.settlement_result === "no";
 
-              // Filled @ display logic
               let filledAtDisplay: React.ReactNode;
               if (o.fill_cost_dollars != null && o.filled_count) {
-                // Real fill data from Kalshi — show actual per-contract price
                 const perContract = o.fill_cost_dollars / o.filled_count;
-                filledAtDisplay = (
-                  <span className="text-gray-300">${perContract.toFixed(2)}</span>
-                );
+                filledAtDisplay = <span className="text-gray-300">${perContract.toFixed(2)}</span>;
               } else if (isSettled && o.order_price_dollars != null) {
-                // Settled but no fill data captured — P&L used limit price as proxy.
-                // The ~ prefix signals this is an estimate, not confirmed fill data.
                 filledAtDisplay = (
                   <span className="text-amber-500/80" title="Estimated — Kalshi fill data missing. P&L calculated using limit price as proxy.">
                     ~${o.order_price_dollars.toFixed(2)}
@@ -926,16 +855,17 @@ function OrdersTable({ orders }: { orders: Order[] }) {
                     <div className="text-xs text-gray-600">{fmt.time(o.created_at)}</div>
                   </td>
                   <td className="px-4 py-3 max-w-xs">
-                    <div className="font-mono text-xs text-indigo-400 truncate" title={o.ticker}>{o.ticker}</div>
-                    <div className="text-xs text-gray-400 truncate" title={o.market_title}>{o.market_title || "—"}</div>
+                    {/* ── Ticker — clickable link to market detail ── */}
+                    <TickerLink ticker={o.ticker} />
+                    <div className="text-xs text-gray-400 truncate mt-0.5" title={o.market_title}>
+                      {o.market_title || "—"}
+                    </div>
                   </td>
                   <td className="px-4 py-3 text-gray-400 text-xs whitespace-nowrap">{o.category || "—"}</td>
                   <td className="px-4 py-3 font-mono text-gray-300 whitespace-nowrap">
                     ${o.order_price_dollars?.toFixed(2) ?? "—"}
                   </td>
-                  <td className="px-4 py-3 font-mono text-xs whitespace-nowrap">
-                    {filledAtDisplay}
-                  </td>
+                  <td className="px-4 py-3 font-mono text-xs whitespace-nowrap">{filledAtDisplay}</td>
                   <td className="px-4 py-3"><ResultBadge result={o.settlement_result} /></td>
                   <td className="px-4 py-3 font-mono text-gray-500 text-xs whitespace-nowrap">
                     {o.fees_dollars != null ? `$${o.fees_dollars.toFixed(4)}` : "—"}
