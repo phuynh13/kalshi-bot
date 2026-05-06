@@ -22,6 +22,11 @@ Settlement strategy:
   there, the order was filled and we have exact fill cost, fees, and payout.
   We use settlements as the PRIMARY path and only fall back to the order status
   endpoint to catch cancellations (orders that never filled).
+
+  Critical invariant: only orders confirmed as filled via settlements should
+  ever receive a settlement_result of 'yes' or 'no'. Orders that sat resting
+  and expired unfilled are marked 'cancelled' regardless of market outcome.
+  This ensures P&L and win rate metrics are never contaminated by phantom trades.
 """
 
 import logging
@@ -44,7 +49,10 @@ log = logging.getLogger(__name__)
 
 ROUND_UP_CENTS = True
 
-KNOWN_UNFILLED = {"cancelled", "expired"}
+# Kalshi uses both spellings depending on context — include both.
+# 'cancelled' appears in order status responses.
+# 'canceled'  appears in some older/archived order records.
+KNOWN_UNFILLED = {"cancelled", "canceled", "expired"}
 
 
 def _parse_dollar_str(value) -> float:
@@ -61,7 +69,8 @@ def update_settlements(kalshi: KalshiClient, db: Database):
 
     Phase 1: Mark stale orders (>7 days past close) as unknown — give up.
     Phase 2: Fetch Kalshi settlements as ground truth. For each unsettled
-             order that appears in settlements, record exact fill data.
+             order that appears in settlements, record exact fill data and
+             update status to 'executed' (confirming the order was filled).
     Phase 3: For orders NOT in settlements (still pending or cancelled),
              check the order status endpoint to catch cancellations.
     """
@@ -89,8 +98,8 @@ def update_settlements(kalshi: KalshiClient, db: Database):
     # More than enough headroom for the 7-day giveup window.
     try:
         kalshi_settlements = kalshi.get_settlements(limit=500)
-        # Build lookup: ticker → settlement record
-        # Note: a ticker should only appear once in settlements (one resolution).
+        # Build lookup: ticker → settlement record.
+        # A ticker should only appear once in settlements (one resolution).
         settlement_by_ticker: dict[str, dict] = {
             s["ticker"]: s
             for s in kalshi_settlements
@@ -113,8 +122,9 @@ def update_settlements(kalshi: KalshiClient, db: Database):
         kalshi_order_id = order.get("kalshi_order_id", "")
 
         # ── PRIMARY PATH: ticker found in Kalshi settlements ──────────────
-        # This means the order was filled and the market has resolved.
-        # The settlement record has exact fill cost, fees, and payout.
+        # Presence in settlements is ground truth — this order was filled
+        # and the market has resolved. Record exact fill data and update
+        # status to 'executed' to reflect the confirmed fill.
         if ticker in settlement_by_ticker:
             s = settlement_by_ticker[ticker]
             result = s.get("market_result", "")
@@ -142,6 +152,12 @@ def update_settlements(kalshi: KalshiClient, db: Database):
                 fees_dollars=fees_dollars,
                 fill_cost_dollars=fill_cost_dollars,
                 filled_count=filled_count,
+                # Explicitly mark as executed — the order was filled.
+                # This is critical: resting orders that filled and settled
+                # must be distinguished from resting orders that expired
+                # unfilled. Without this, status stays 'resting' even after
+                # confirmed fill, which contaminates fill rate metrics.
+                mark_executed=True,
             )
             log.info(
                 f"  ✓ {ticker}: {result.upper()} | "
@@ -153,8 +169,8 @@ def update_settlements(kalshi: KalshiClient, db: Database):
 
         # ── FALLBACK PATH: ticker not in settlements ───────────────────────
         # The market hasn't resolved yet (still open/pending), or the order
-        # was cancelled/expired without filling (no settlement record exists
-        # for unfilled orders). Check the order status endpoint to distinguish.
+        # expired unfilled (no settlement record exists for unfilled orders).
+        # Check the order status endpoint to catch cancellations.
         if not kalshi_order_id:
             log.debug(f"  {ticker}: not in settlements, no order ID — skipping")
             continue
@@ -164,32 +180,37 @@ def update_settlements(kalshi: KalshiClient, db: Database):
             order_status = kalshi_order.get("status", "")
 
             if order_status in KNOWN_UNFILLED:
+                # Explicitly cancelled or expired — never filled.
                 db.mark_order_cancelled(order["id"])
                 log.info(
                     f"  ↩ {ticker}: status='{order_status}' → cancelled (pnl=$0.00)"
                 )
+
             elif order_status == "resting":
                 # Still sitting in the order book waiting to match.
                 # Market hasn't closed yet (or just closed and hasn't settled).
+                # Do nothing — retry next run.
                 log.debug(
-                    f"  {ticker}: still resting — market hasn't settled yet, will retry"
+                    f"  {ticker}: still resting — market hasn't settled yet, "
+                    f"will retry"
                 )
+
             elif order_status == "partially_filled":
                 log.warning(
                     f"  ⚠ {ticker}: partially_filled — needs manual review, skipping"
                 )
+
             else:
                 # Filled/executed but not in the settlements window yet.
                 # Can happen if market resolved very recently. Retry next run.
                 log.debug(
-                    f"  {ticker}: status='{order_status}' but not in settlements yet — "
-                    f"will retry next run"
+                    f"  {ticker}: status='{order_status}' but not in settlements "
+                    f"yet — will retry next run"
                 )
 
         except Exception as e:
             # 404 = order archived but not in our 500-record settlements window.
-            # This is unusual (would mean >500 settlements since this order placed).
-            # The stale check will eventually catch and mark it unknown.
+            # This is unusual. The stale check will eventually catch it.
             log.debug(
                 f"  {ticker}: order endpoint error ({type(e).__name__}) and "
                 f"not in recent settlements — skipping until stale threshold"
