@@ -53,10 +53,8 @@ const fmt = {
     const day = Math.floor(hr / 24);
     return `${day} day${day === 1 ? "" : "s"} ago`;
   },
-  // Balance endpoint returns integer cents
   centsToDollars: (cents: number | null | undefined) =>
     cents == null ? "—" : `$${(cents / 100).toFixed(2)}`,
-  // Position endpoint returns dollar strings like "0.660000"
   dollarString: (s: string | null | undefined) => {
     if (s == null) return "—";
     const v = parseFloat(s);
@@ -65,8 +63,6 @@ const fmt = {
 };
 
 // ── Ticker Link ───────────────────────────────────────────────────────────────
-// Reusable component — renders a ticker as a clickable link to /market/[ticker].
-// Used in both the orders table and open positions panel.
 
 function TickerLink({ ticker, className = "" }: { ticker: string; className?: string }) {
   return (
@@ -96,40 +92,24 @@ function LastRunBanner({ run }: { run: Run | null }) {
     );
   }
 
-  const ageHours =
-    (Date.now() - new Date(run.run_at).getTime()) / (1000 * 60 * 60);
+  const ageHours = (Date.now() - new Date(run.run_at).getTime()) / (1000 * 60 * 60);
   const isStale = ageHours > STALE_HOURS;
-
   const dot = isStale ? "bg-red-500" : "bg-emerald-500";
   const border = isStale ? "border-red-900" : "border-emerald-900/50";
   const bg = isStale ? "bg-red-950/30" : "bg-gray-900";
-  const label = isStale
-    ? `⚠ Bot hasn't run in ${Math.floor(ageHours)} hours`
-    : `Bot is healthy`;
+  const label = isStale ? `⚠ Bot hasn't run in ${Math.floor(ageHours)} hours` : `Bot is healthy`;
   const labelColor = isStale ? "text-red-300" : "text-gray-300";
 
   return (
-    <div
-      className={`${bg} border ${border} rounded-xl px-5 py-3 mb-4 flex items-center justify-between flex-wrap gap-3`}
-    >
+    <div className={`${bg} border ${border} rounded-xl px-5 py-3 mb-4 flex items-center justify-between flex-wrap gap-3`}>
       <div className="flex items-center gap-3">
         <span className={`w-2 h-2 rounded-full ${dot}`} />
         <span className={`text-sm font-medium ${labelColor}`}>{label}</span>
-        <span className="text-xs text-gray-500">
-          · Last run {fmt.relative(run.run_at)}
-        </span>
+        <span className="text-xs text-gray-500">· Last run {fmt.relative(run.run_at)}</span>
       </div>
       <div className="text-xs text-gray-500 flex items-center gap-4">
-        <span>
-          <span className="text-gray-400 font-medium">{run.orders_placed}</span>{" "}
-          placed
-        </span>
-        <span>
-          <span className="text-gray-400 font-medium">
-            ${run.total_spent_dollars?.toFixed(2) ?? "0.00"}
-          </span>{" "}
-          spent
-        </span>
+        <span><span className="text-gray-400 font-medium">{run.orders_placed}</span> placed</span>
+        <span><span className="text-gray-400 font-medium">${run.total_spent_dollars?.toFixed(2) ?? "0.00"}</span> spent</span>
         <span>{run.markets_evaluated} evaluated</span>
       </div>
     </div>
@@ -152,22 +132,16 @@ function KillSwitch() {
         .eq("key", "trading_enabled")
         .maybeSingle();
       if (cancelled) return;
-      if (fetchError) {
-        setError(fetchError.message);
-        return;
-      }
+      if (fetchError) { setError(fetchError.message); return; }
       setEnabled(data?.value?.toLowerCase() !== "false");
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, []);
 
   async function toggle() {
     if (enabled === null || busy) return;
     const next = !enabled;
-    const action = next ? "enable" : "disable";
-    if (!confirm(`Are you sure you want to ${action} trading?`)) return;
+    if (!confirm(`Are you sure you want to ${next ? "enable" : "disable"} trading?`)) return;
     setBusy(true);
     setError(null);
     try {
@@ -200,15 +174,12 @@ function KillSwitch() {
   const bg = enabled ? "bg-gray-900" : "bg-red-950/30";
   const label = enabled ? "Trading enabled" : "Trading disabled";
   const labelColor = enabled ? "text-gray-300" : "text-red-300";
-  const btnText = enabled ? "Disable" : "Enable";
   const btnColor = enabled
     ? "border-red-800 text-red-300 hover:bg-red-950/50"
     : "border-emerald-800 text-emerald-300 hover:bg-emerald-950/50";
 
   return (
-    <div
-      className={`${bg} border ${border} rounded-xl px-5 py-3 mb-6 flex items-center justify-between flex-wrap gap-3`}
-    >
+    <div className={`${bg} border ${border} rounded-xl px-5 py-3 mb-6 flex items-center justify-between flex-wrap gap-3`}>
       <div className="flex items-center gap-3">
         <span className={`w-2 h-2 rounded-full ${dot}`} />
         <span className={`text-sm font-medium ${labelColor}`}>{label}</span>
@@ -219,7 +190,7 @@ function KillSwitch() {
         disabled={busy}
         className={`text-xs border rounded-lg px-3 py-1.5 transition disabled:opacity-40 ${btnColor}`}
       >
-        {busy ? "Working…" : btnText}
+        {busy ? "Working…" : enabled ? "Disable" : "Enable"}
       </button>
     </div>
   );
@@ -240,9 +211,7 @@ function OpenPositionsPanel() {
     try {
       const resp = await fetch("/api/positions");
       const json = await resp.json();
-      if (!resp.ok || !json.ok) {
-        throw new Error(json.error || `HTTP ${resp.status}`);
-      }
+      if (!resp.ok || !json.ok) throw new Error(json.error || `HTTP ${resp.status}`);
       const activePositions = (json.positions as KalshiPosition[]).filter((p) => {
         const count = parseFloat((p as any).position_fp ?? "0");
         return !isNaN(count) && count !== 0;
@@ -258,25 +227,13 @@ function OpenPositionsPanel() {
 
   useEffect(() => { load(); }, []);
 
-  function getCount(p: KalshiPosition): number {
-    return parseFloat((p as any).position_fp ?? "0") || 0;
-  }
-  function getExposureDollars(p: KalshiPosition): number {
-    return parseFloat((p as any).market_exposure_dollars ?? "0") || 0;
-  }
-  function getRealizedPnlDollars(p: KalshiPosition): string {
-    return fmt.dollarString((p as any).realized_pnl_dollars);
-  }
-  function getFeesDollars(p: KalshiPosition): string {
-    return fmt.dollarString((p as any).fees_paid_dollars);
-  }
+  const getCount = (p: KalshiPosition) => parseFloat((p as any).position_fp ?? "0") || 0;
+  const getExposure = (p: KalshiPosition) => parseFloat((p as any).market_exposure_dollars ?? "0") || 0;
+  const getRealizedPnl = (p: KalshiPosition) => fmt.dollarString((p as any).realized_pnl_dollars);
+  const getFees = (p: KalshiPosition) => fmt.dollarString((p as any).fees_paid_dollars);
 
-  const totalExposureDollars = positions
-    ? positions.reduce((sum, p) => sum + getExposureDollars(p), 0)
-    : 0;
-  const totalContracts = positions
-    ? positions.reduce((sum, p) => sum + Math.abs(getCount(p)), 0)
-    : 0;
+  const totalExposure = positions ? positions.reduce((s, p) => s + getExposure(p), 0) : 0;
+  const totalContracts = positions ? positions.reduce((s, p) => s + Math.abs(getCount(p)), 0) : 0;
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-xl mb-6 overflow-hidden">
@@ -296,7 +253,7 @@ function OpenPositionsPanel() {
               <span className="text-xs text-gray-500">positions ·</span>
               <span className="text-gray-300">{totalContracts}</span>
               <span className="text-xs text-gray-500">contracts ·</span>
-              <span className="text-gray-300">${totalExposureDollars.toFixed(2)}</span>
+              <span className="text-gray-300">${totalExposure.toFixed(2)}</span>
               <span className="text-xs text-gray-500">at risk</span>
             </div>
           )}
@@ -304,15 +261,10 @@ function OpenPositionsPanel() {
         <div className="flex items-center gap-3">
           {balance && (
             <span className="text-xs text-gray-500 hidden sm:inline">
-              balance:{" "}
-              <span className="text-gray-300 font-mono">
-                {fmt.centsToDollars(balance.balance)}
-              </span>
+              balance: <span className="text-gray-300 font-mono">{fmt.centsToDollars(balance.balance)}</span>
             </span>
           )}
-          <span className="text-xs text-gray-500">
-            {expanded ? "▲ collapse" : "▼ details"}
-          </span>
+          <span className="text-xs text-gray-500">{expanded ? "▲ collapse" : "▼ details"}</span>
         </div>
       </button>
 
@@ -322,8 +274,7 @@ function OpenPositionsPanel() {
             <p className="text-xs text-red-400">Could not fetch positions: {error}</p>
           ) : positions === null || positions.length === 0 ? (
             <p className="text-xs text-gray-500">
-              No filled positions. Resting limit orders waiting to match will
-              appear here once filled.
+              No filled positions. Resting limit orders waiting to match will appear here once filled.
             </p>
           ) : (
             <div className="overflow-x-auto">
@@ -331,9 +282,7 @@ function OpenPositionsPanel() {
                 <thead>
                   <tr className="border-b border-gray-800">
                     {["Ticker", "Side", "Contracts", "Cost basis", "Realized P&L", "Fees"].map((h) => (
-                      <th key={h} className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        {h}
-                      </th>
+                      <th key={h} className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{h}</th>
                     ))}
                   </tr>
                 </thead>
@@ -342,19 +291,16 @@ function OpenPositionsPanel() {
                     const count = getCount(p);
                     return (
                       <tr key={p.ticker} className="hover:bg-gray-800/40 transition">
-                        {/* ── Ticker — clickable link to market detail ── */}
-                        <td className="px-3 py-2">
-                          <TickerLink ticker={p.ticker} />
-                        </td>
+                        <td className="px-3 py-2"><TickerLink ticker={p.ticker} /></td>
                         <td className="px-3 py-2 text-xs">
                           <span className={count > 0 ? "text-emerald-400" : "text-red-400"}>
                             {count > 0 ? "YES" : "NO"}
                           </span>
                         </td>
                         <td className="px-3 py-2 font-mono text-gray-300">{Math.abs(count)}</td>
-                        <td className="px-3 py-2 font-mono text-gray-300">${getExposureDollars(p).toFixed(2)}</td>
-                        <td className="px-3 py-2 font-mono text-gray-500 text-xs">{getRealizedPnlDollars(p)}</td>
-                        <td className="px-3 py-2 font-mono text-gray-500 text-xs">{getFeesDollars(p)}</td>
+                        <td className="px-3 py-2 font-mono text-gray-300">${getExposure(p).toFixed(2)}</td>
+                        <td className="px-3 py-2 font-mono text-gray-500 text-xs">{getRealizedPnl(p)}</td>
+                        <td className="px-3 py-2 font-mono text-gray-500 text-xs">{getFees(p)}</td>
                       </tr>
                     );
                   })}
@@ -487,6 +433,11 @@ function RunFunnel({ run, ordersForRun }: { run: Run | null; ordersForRun: Order
 }
 
 // ── Edge over Implied Odds Chart ──────────────────────────────────────────────
+//
+// Bug fix: Recharts does not reliably pass custom data fields through the label
+// prop's `payload` object. `payload?.total` was always undefined, causing n=0
+// on every bar. Fix: pass `total` explicitly via the Bar label render prop
+// using `props.index` to look up the correct bucket from the closure.
 
 const MIN_RELIABLE_SAMPLE = 10;
 const BUCKET_WIDTH = 0.05;
@@ -494,23 +445,40 @@ const BUCKET_START = 0.55;
 const BUCKET_END = 0.90;
 
 function EdgeBarLabel(props: any) {
-  const { x, y, width, height, value, payload } = props;
-  if (value == null || payload?.total === 0) return null;
+  // `total` is injected explicitly by the Bar label render prop below.
+  // Never read from `payload?.total` — Recharts does not reliably forward it.
+  const { x, y, width, height, value, total } = props;
 
-  const n = payload?.total ?? 0;
+  if (value == null || !total) return null;
+
   const isPositive = value >= 0;
   const barCenterX = x + width / 2;
   const labelY = isPositive ? y - 6 : y + height + 16;
   const edgeStr = `${value >= 0 ? "+" : ""}${value.toFixed(1)}%`;
-  const dimmed = n < MIN_RELIABLE_SAMPLE;
+  const dimmed = total < MIN_RELIABLE_SAMPLE;
 
   return (
     <g opacity={dimmed ? 0.45 : 1}>
-      <text x={barCenterX} y={labelY} textAnchor="middle" fill={isPositive ? "#10b981" : "#ef4444"} fontSize={10} fontWeight={600} fontFamily="monospace">
+      <text
+        x={barCenterX}
+        y={labelY}
+        textAnchor="middle"
+        fill={isPositive ? "#10b981" : "#ef4444"}
+        fontSize={10}
+        fontWeight={600}
+        fontFamily="monospace"
+      >
         {edgeStr}
       </text>
-      <text x={barCenterX} y={labelY + 13} textAnchor="middle" fill="#6b7280" fontSize={9} fontFamily="monospace">
-        n={n}
+      <text
+        x={barCenterX}
+        y={labelY + 13}
+        textAnchor="middle"
+        fill="#6b7280"
+        fontSize={9}
+        fontFamily="monospace"
+      >
+        n={total}
       </text>
     </g>
   );
@@ -603,15 +571,50 @@ function WinRateByPriceChart({ orders }: { orders: Order[] }) {
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={buckets} margin={{ top: 32, right: 8, left: 0, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-              <XAxis dataKey="range" tick={{ fill: "#6b7280", fontSize: 10 }} tickLine={false} axisLine={false} interval={0} />
-              <YAxis domain={yDomain} tick={{ fill: "#6b7280", fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={(v) => `${v > 0 ? "+" : ""}${v}%`} />
+              <XAxis
+                dataKey="range"
+                tick={{ fill: "#6b7280", fontSize: 10 }}
+                tickLine={false}
+                axisLine={false}
+                interval={0}
+              />
+              <YAxis
+                domain={yDomain}
+                tick={{ fill: "#6b7280", fontSize: 11 }}
+                tickLine={false}
+                axisLine={false}
+                tickFormatter={(v) => `${v > 0 ? "+" : ""}${v}%`}
+              />
               <Tooltip
-                contentStyle={{ backgroundColor: "#111827", border: "1px solid #374151", borderRadius: "8px", fontSize: "12px" }}
-                formatter={(_v: number, _n: string, p: { payload: { wins: number; losses: number; total: number; winRate: number | null; impliedPct: number; edge: number | null } }) => {
+                contentStyle={{
+                  backgroundColor: "#111827",
+                  border: "1px solid #374151",
+                  borderRadius: "8px",
+                  fontSize: "12px",
+                }}
+                formatter={(
+                  _v: number,
+                  _n: string,
+                  p: {
+                    payload: {
+                      wins: number;
+                      losses: number;
+                      total: number;
+                      winRate: number | null;
+                      impliedPct: number;
+                      edge: number | null;
+                    };
+                  }
+                ) => {
                   const d = p.payload;
                   if (d.total === 0) return ["No data", ""];
-                  const edgeStr = d.edge != null ? `${d.edge >= 0 ? "+" : ""}${d.edge.toFixed(1)}%` : "—";
-                  return [`Edge: ${edgeStr}\nActual: ${d.winRate?.toFixed(1) ?? "—"}%  Implied: ${d.impliedPct}%\n${d.wins}W / ${d.losses}L  (n=${d.total})`, ""];
+                  const edgeStr = d.edge != null
+                    ? `${d.edge >= 0 ? "+" : ""}${d.edge.toFixed(1)}%`
+                    : "—";
+                  return [
+                    `Edge: ${edgeStr}\nActual: ${d.winRate?.toFixed(1) ?? "—"}%  Implied: ${d.impliedPct}%\n${d.wins}W / ${d.losses}L  (n=${d.total})`,
+                    "",
+                  ];
                 }}
               />
               <ReferenceLine y={0} stroke="#6b7280" strokeWidth={1} />
@@ -619,9 +622,28 @@ function WinRateByPriceChart({ orders }: { orders: Order[] }) {
               <ReferenceLine y={-10} stroke="#1f2937" strokeDasharray="3 3" />
               <ReferenceLine y={20} stroke="#1f2937" strokeDasharray="3 3" />
               <ReferenceLine y={-20} stroke="#1f2937" strokeDasharray="3 3" />
-              <Bar dataKey="edge" radius={[3, 3, 0, 0]} label={<EdgeBarLabel />}>
+
+              {/*
+                Fix: pass `total` explicitly via render prop using `props.index`
+                to look up the correct bucket. Never rely on Recharts forwarding
+                custom fields through `payload` in the label component.
+              */}
+              <Bar
+                dataKey="edge"
+                radius={[3, 3, 0, 0]}
+                label={(props: any) => (
+                  <EdgeBarLabel
+                    {...props}
+                    total={buckets[props.index]?.total ?? 0}
+                  />
+                )}
+              >
                 {buckets.map((b, i) => (
-                  <Cell key={i} fill={b.edge == null ? "#1f2937" : b.edge >= 0 ? "#10b981" : "#ef4444"} fillOpacity={b.reliable ? 1 : 0.35} />
+                  <Cell
+                    key={i}
+                    fill={b.edge == null ? "#1f2937" : b.edge >= 0 ? "#10b981" : "#ef4444"}
+                    fillOpacity={b.reliable ? 1 : 0.35}
+                  />
                 ))}
               </Bar>
             </BarChart>
@@ -765,7 +787,6 @@ const PAGE_SIZE = 25;
 
 function OrdersTable({ orders }: { orders: Order[] }) {
   const [page, setPage] = useState(0);
-
   const totalPages = Math.max(1, Math.ceil(orders.length / PAGE_SIZE));
   const pageOrders = orders.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
@@ -840,7 +861,10 @@ function OrdersTable({ orders }: { orders: Order[] }) {
                 filledAtDisplay = <span className="text-gray-300">${perContract.toFixed(2)}</span>;
               } else if (isSettled && o.order_price_dollars != null) {
                 filledAtDisplay = (
-                  <span className="text-amber-500/80" title="Estimated — Kalshi fill data missing. P&L calculated using limit price as proxy.">
+                  <span
+                    className="text-amber-500/80"
+                    title="Estimated — Kalshi fill data missing. P&L calculated using limit price as proxy."
+                  >
                     ~${o.order_price_dollars.toFixed(2)}
                   </span>
                 );
@@ -855,7 +879,6 @@ function OrdersTable({ orders }: { orders: Order[] }) {
                     <div className="text-xs text-gray-600">{fmt.time(o.created_at)}</div>
                   </td>
                   <td className="px-4 py-3 max-w-xs">
-                    {/* ── Ticker — clickable link to market detail ── */}
                     <TickerLink ticker={o.ticker} />
                     <div className="text-xs text-gray-400 truncate mt-0.5" title={o.market_title}>
                       {o.market_title || "—"}
@@ -985,9 +1008,11 @@ export default function DashboardPage() {
         <StatCard
           label="Total Fees"
           value={stats?.total_fees != null ? `$${stats.total_fees.toFixed(2)}` : "—"}
-          sub={stats?.total_pnl_pre_fees != null && stats.total_pnl_pre_fees > 0
-            ? `${((100 * (stats.total_fees ?? 0)) / stats.total_pnl_pre_fees).toFixed(1)}% of gross P&L`
-            : "Lifetime"}
+          sub={
+            stats?.total_pnl_pre_fees != null && stats.total_pnl_pre_fees > 0
+              ? `${((100 * (stats.total_fees ?? 0)) / stats.total_pnl_pre_fees).toFixed(1)}% of gross P&L`
+              : "Lifetime"
+          }
           color="text-orange-300"
         />
       </div>
